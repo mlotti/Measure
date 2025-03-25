@@ -68,7 +68,8 @@ int main(int argc, char** argv) {
   // InsecureChannelCredentials()).
   MeasureClient measure(
       grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials()));
-  int value = 6;
+  int value = 0;
+  if (argc>1) value = std::stoi(argv[1]);
   int reply = measure.RecordMeasurement(value);
   std::cout << "Measured: " << value << std::endl;
   if (reply==0) std::cout << "Recieved: thumbs up" << std::endl;
