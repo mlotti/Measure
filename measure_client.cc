@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
   int value = 6;
   int reply = measure.RecordMeasurement(value);
   std::cout << "Measured: " << value << std::endl;
-  if (reply==1) std::cout << "Recieved thumbs up" << std::endl;
-  if (reply!=1) std::cout << "Recieved thumbs down" << std::endl;
+  if (reply==0) std::cout << "Recieved: thumbs up" << std::endl;
+  if (reply==1) std::cout << "Recieved: thumbs down" << std::endl;
   return 0;
 }
