@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <memory>
 #include <string>
 
@@ -26,12 +27,24 @@ using measure::Thumbs;
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 
+void Write(int result) {
+  std::ofstream myfile("result.txt", std::ios::app);
+  if (myfile.is_open()) {
+    myfile << result << std::endl;
+    myfile.close();
+  }
+}
+
 // Logic and data behind the server's behavior.
 class MeasureServiceImpl final : public Measure::Service {
   Status RecordMeasurement(ServerContext* context, const Measurement* request,
                   Thumbs* reply) override {
-    int thumbsUp = 1;
+    int thumbsUp = 0;
+
+    Write(request->point());
+
     reply->set_response(thumbsUp);
+
     return Status::OK;
   }
 };
