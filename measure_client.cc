@@ -68,11 +68,24 @@ int main(int argc, char** argv) {
   // InsecureChannelCredentials()).
   MeasureClient measure(
       grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials()));
+
   int value = 0;
-  if (argc>1) value = std::stoi(argv[1]);
-  int reply = measure.RecordMeasurement(value);
-  std::cout << "Measured: " << value << std::endl;
-  if (reply==0) std::cout << "Recieved: thumbs up" << std::endl;
-  if (reply==1) std::cout << "Recieved: thumbs down" << std::endl;
+  int reply = 0;
+  if (argc==1) {
+    for (int i=0; i<500; i++) {
+      value = i;
+      reply = measure.RecordMeasurement(value);
+      std::cout << "Measured: " << value << std::endl;
+      if (reply==0) std::cout << "Recieved: thumbs up" << std::endl;
+      if (reply==1) std::cout << "Recieved: thumbs down" << std::endl; 
+    }
+  }
+  if (argc>1) {
+    value = std::stoi(argv[1]);
+    reply = measure.RecordMeasurement(value);
+    std::cout << "Measured: " << value << std::endl;
+    if (reply==0) std::cout << "Recieved: thumbs up" << std::endl;
+    if (reply==1) std::cout << "Recieved: thumbs down" << std::endl;
+  }
   return 0;
 }
