@@ -41,17 +41,31 @@ class MeasureClient {
     // the server and/or tweak certain RPC behaviors.
     ClientContext context;
 
+    std::mutex mu;
+    int result;
+    std::condition_variable cv;
+    bool done = false;
+    
     // The actual RPC.
-    Status status = stub_->RecordMeasurement(&context, measurement, &thumbs);
-
-    // Act upon its status.
-    if (status.ok()) {
-      return thumbs.response();
-    } else {
-      std::cout << status.error_code() << ": " << status.error_message()
-                << std::endl;
-      return 0;
-    }
+    stub_->async()->RecordMeasurement(
+        &context, &measurement, &thumbs,
+	[&result, &mu, &cv, &done, thumbs, this](Status status) {
+	    int ret;
+	    if (!status.ok()) {
+	      std::cout << "RecordMeasurement RPC failed" << std::endl;
+	      ret = 0;
+	    } else {
+	      std::cout << "Measurement recieved" << std::endl;
+	      ret = thumbs.response();
+	    }
+	    std::lock_guard<std::mutex> lock(mu);
+	    result = ret;
+	    done = true;
+	    cv.notify_one();
+	});
+    std::unique_lock<std::mutex> lock(mu);
+    cv.wait(lock, [&done] {return done;});
+    return result;
   }
 
  private:

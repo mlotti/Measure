@@ -36,16 +36,16 @@ void Write(int result) {
 }
 
 // Logic and data behind the server's behavior.
-class MeasureServiceImpl final : public Measure::Service {
-  Status RecordMeasurement(ServerContext* context, const Measurement* request,
-                  Thumbs* reply) override {
+class MeasureServiceImpl final : public Measure::CallbackService {
+  grpc::ServerUnaryReactor* RecordMeasurement(grpc::CallbackServerContext* context,
+					      const Measurement* request,
+					      Thumbs* reply) override {
     int thumbsUp = 0;
-
     Write(request->point());
-
     reply->set_response(thumbsUp);
-
-    return Status::OK;
+    auto* reactor = context->DefaultReactor();
+    reactor->Finish(Status::OK);
+    return reactor;
   }
 };
 
