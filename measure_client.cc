@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
   int value = 0;
   int reply = 0;
   if (argc==1) {
-    for (int i=0; i<500; i++) {
+    for (int i=0; i<10; i++) {
       value = i;
       reply = measure.RecordMeasurement(value);
       std::cout << "Measured: " << value << std::endl;

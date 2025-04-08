@@ -17,6 +17,9 @@
 #include "measure.grpc.pb.h"
 #endif
 
+#include <chrono>
+#include <thread>
+
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
@@ -41,6 +44,7 @@ class MeasureServiceImpl final : public Measure::CallbackService {
 					      const Measurement* request,
 					      Thumbs* reply) override {
     int thumbsUp = 0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     Write(request->point());
     reply->set_response(thumbsUp);
     auto* reactor = context->DefaultReactor();
