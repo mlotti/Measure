@@ -32,8 +32,9 @@ ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 
 void Write(int result) {
   std::ofstream myfile("result.txt", std::ios::app);
+  auto t = std::hash<std::thread::id>{}(std::this_thread::get_id());
   if (myfile.is_open()) {
-    myfile << result << std::endl;
+    myfile << result << " " << t <<  std::endl;
     myfile.close();
   }
 }
@@ -44,7 +45,7 @@ class MeasureServiceImpl final : public Measure::CallbackService {
 					      const Measurement* request,
 					      Thumbs* reply) override {
     int thumbsUp = 0;
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
     Write(request->point());
     reply->set_response(thumbsUp);
     auto* reactor = context->DefaultReactor();

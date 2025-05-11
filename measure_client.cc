@@ -63,6 +63,7 @@ class MeasureClient {
 	    done = true;
 	    cv.notify_one();
 	});
+    std::cout << "waiting around" << std::endl;
     std::unique_lock<std::mutex> lock(mu);
     cv.wait(lock, [&done] {return done;});
     return result;
