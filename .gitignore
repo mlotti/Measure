@@ -20,3 +20,6 @@ measure_server
 
 # Output files
 result.txt
+
+# CodeQL generated files
+_codeql_detected_source_root
