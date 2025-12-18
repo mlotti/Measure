@@ -1,6 +1,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <random>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -84,15 +85,27 @@ int main(int argc, char** argv) {
   MeasureClient measure(
       grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials()));
 
+  // Set up random number generator for values between 0 and 10
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dis(0, 10);
+
   int value = 0;
   int reply = 0;
   if (argc==1) {
     for (int i=0; i<10; i++) {
-      value = i;
-      reply = measure.RecordMeasurement(value);
-      std::cout << "Measured: " << value << std::endl;
-      if (reply==0) std::cout << "Recieved: thumbs up" << std::endl;
-      if (reply==1) std::cout << "Recieved: thumbs down" << std::endl; 
+      value = dis(gen);
+      std::cout << "Generated random number: " << value << std::endl;
+      
+      // Only send to server if value is above 8
+      if (value > 8) {
+        reply = measure.RecordMeasurement(value);
+        std::cout << "Measured: " << value << std::endl;
+        if (reply==0) std::cout << "Recieved: thumbs up" << std::endl;
+        if (reply==1) std::cout << "Recieved: thumbs down" << std::endl;
+      } else {
+        std::cout << "Value " << value << " not sent (not above 8)" << std::endl;
+      }
     }
   }
   if (argc>1) {
