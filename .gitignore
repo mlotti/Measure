@@ -1,0 +1,22 @@
+# Build directories
+cmake/build/
+build/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+!common.cmake
+
+# Compiled binaries
+measure_client
+measure_server
+
+# Generated protobuf files
+*.pb.h
+*.pb.cc
+
+# Output files
+result.txt
