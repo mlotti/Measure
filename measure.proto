@@ -7,10 +7,20 @@ option objc_class_prefix = "M";
 
 package measure;
 
+// Operating mode for the measurement threshold.
+enum Mode {
+  NORMAL = 0;
+  CALIBRATION = 1;
+}
+
 // The service definition.
 service Measure {
   // Sends a measurement
   rpc RecordMeasurement (Measurement) returns (Thumbs) {}
+  // Subscribes a client to server-pushed threshold commands.
+  rpc Subscribe (ClientInfo) returns (stream Command) {}
+  // Operator command: put named client (or all clients) into calibration mode.
+  rpc SetCalibrationMode (CalibrationRequest) returns (CalibrationResponse) {}
 }
 
 // The request containing the measurement
@@ -21,4 +31,28 @@ message Measurement {
 // The response giving thumbs up or down
 message Thumbs {
   int32 response = 1;
+}
+
+// Identifies a subscribing client.
+message ClientInfo {
+  string client_id = 1;
+}
+
+// Server-pushed command that sets the client's measurement threshold.
+message Command {
+  int32 threshold = 1;
+  Mode mode = 2;
+}
+
+// Request to enter calibration mode.
+message CalibrationRequest {
+  // Client to target; empty string means broadcast to all connected clients.
+  string client_id = 1;
+  // How long to stay in calibration mode before reverting (seconds).
+  int32 duration_seconds = 2;
+}
+
+// Acknowledgement of a calibration request.
+message CalibrationResponse {
+  bool accepted = 1;
 }
