@@ -576,12 +576,21 @@ class HttpServer {
   }
 
  private:
+  void CloseServerSocket() {
+    int server_fd = server_fd_.exchange(-1);
+    if (server_fd >= 0) {
+      shutdown(server_fd, SHUT_RDWR);
+      close(server_fd);
+    }
+  }
+
   void Run() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
       std::cerr << "Failed to create HTTP socket" << std::endl;
       return;
     }
+    server_fd_.store(server_fd);
 
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -595,18 +604,17 @@ class HttpServer {
         0) {
       std::cerr << "Failed to bind HTTP server on " << kHttpBindAddress << ":"
                 << port_ << ": " << std::strerror(errno) << std::endl;
-      close(server_fd);
+      CloseServerSocket();
       return;
     }
 
     if (listen(server_fd, 16) < 0) {
       std::cerr << "Failed to listen on HTTP server: " << std::strerror(errno)
                 << std::endl;
-      close(server_fd);
+      CloseServerSocket();
       return;
     }
 
-    server_fd_.store(server_fd);
     std::cout << "Graph UI available at http://" << kHttpBindAddress << ":"
               << port_ << std::endl;
 
@@ -624,10 +632,7 @@ class HttpServer {
       close(client_fd);
     }
 
-    int owned_fd = server_fd_.exchange(-1);
-    if (owned_fd >= 0) {
-      close(owned_fd);
-    }
+    CloseServerSocket();
   }
 
   uint16_t port_;

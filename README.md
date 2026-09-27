@@ -8,9 +8,10 @@
 
 ## Overview
 
-Clients generate measurements and send values above the active threshold to the
-server. The server stores a bounded in-memory history of recent measurements,
-appends them to `result.txt`, and serves a simple graph UI on localhost.
+Clients generate measurements and, in the current sample client, send values
+above the active threshold to the server. The server stores every received
+measurement in a bounded in-memory history, appends it to `result.txt`, and
+serves a simple graph UI on localhost.
 
 ## Architecture
 
