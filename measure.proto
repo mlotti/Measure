@@ -26,6 +26,8 @@ service Measure {
 // The request containing the measurement
 message Measurement {
   int32 point = 1;
+  string client_id = 2;
+  int64 timestamp_unix_ms = 3;
 }
 
 // The response giving thumbs up or down

@@ -1,11 +1,16 @@
 #include <iostream>
+#include <algorithm>
 #include <fstream>
+#include <cerrno>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -22,6 +27,10 @@
 #endif
 
 #include <chrono>
+#include <cstring>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -36,15 +45,198 @@ using measure::Mode;
 using measure::Thumbs;
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
+ABSL_FLAG(uint16_t, http_port, 8080, "HTTP port for the localhost graph UI");
+ABSL_FLAG(int, samples_retained, 500,
+          "Maximum number of recent measurements retained for the graph");
 
 // Default threshold: only measurements above this value are stored.
 constexpr int kDefaultThreshold = 8;
+constexpr char kHttpBindAddress[] = "127.0.0.1";
 
-void Write(int result) {
+struct StoredMeasurement {
+  std::string client_id;
+  int point;
+  int64_t timestamp_unix_ms;
+};
+
+int64_t CurrentTimeMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+std::string JsonEscape(const std::string& value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (char c : value) {
+    switch (c) {
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '\b':
+        escaped += "\\b";
+        break;
+      case '\f':
+        escaped += "\\f";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        escaped += c;
+        break;
+    }
+  }
+  return escaped;
+}
+
+std::string BuildGraphHtml() {
+  return R"HTML(<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Measure graph</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; background: #f7f7f7; color: #222; }
+    h1 { margin-bottom: 8px; }
+    #meta { margin-bottom: 16px; color: #555; }
+    #legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0 20px; }
+    .legend-item { display: flex; align-items: center; gap: 8px; background: #fff; padding: 6px 10px; border-radius: 999px; }
+    .swatch { width: 12px; height: 12px; border-radius: 999px; }
+    canvas { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); max-width: 100%; }
+  </style>
+</head>
+<body>
+  <h1>Measurements</h1>
+  <div id="meta">Loading…</div>
+  <canvas id="chart" width="960" height="480"></canvas>
+  <div id="legend"></div>
+  <script>
+    const canvas = document.getElementById('chart');
+    const ctx = canvas.getContext('2d');
+    const legend = document.getElementById('legend');
+    const meta = document.getElementById('meta');
+    const palette = ['#1f77b4', '#d62728', '#2ca02c', '#9467bd', '#ff7f0e', '#8c564b', '#17becf', '#e377c2'];
+
+    function colourForClient(clientId, indexMap) {
+      if (!(clientId in indexMap)) {
+        indexMap[clientId] = Object.keys(indexMap).length;
+      }
+      return palette[indexMap[clientId] % palette.length];
+    }
+
+    function draw(data) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const margin = { top: 20, right: 20, bottom: 40, left: 50 };
+      const width = canvas.width - margin.left - margin.right;
+      const height = canvas.height - margin.top - margin.bottom;
+      const points = data.measurements || [];
+
+      ctx.strokeStyle = '#d0d0d0';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(margin.left, margin.top, width, height);
+
+      if (!points.length) {
+        ctx.fillStyle = '#666';
+        ctx.fillText('No measurements yet', margin.left + 20, margin.top + 30);
+        legend.innerHTML = '';
+        meta.textContent = `Showing 0 measurements`;
+        return;
+      }
+
+      const times = points.map((p) => p.timestamp_unix_ms);
+      const values = points.map((p) => p.point);
+      const minTime = Math.min(...times);
+      const maxTime = Math.max(...times);
+      const minValue = Math.min(...values);
+      const maxValue = Math.max(...values);
+      const timeSpan = Math.max(maxTime - minTime, 1);
+      const valueSpan = Math.max(maxValue - minValue, 1);
+      const clientOrder = {};
+      const byClient = {};
+
+      for (const point of points) {
+        byClient[point.client_id] = byClient[point.client_id] || [];
+        byClient[point.client_id].push(point);
+      }
+
+      Object.values(byClient).forEach(series =>
+        series.sort((a, b) => a.timestamp_unix_ms - b.timestamp_unix_ms)
+      );
+
+      ctx.font = '12px sans-serif';
+      ctx.fillStyle = '#444';
+      ctx.fillText(new Date(minTime).toLocaleTimeString(), margin.left, canvas.height - 12);
+      ctx.fillText(new Date(maxTime).toLocaleTimeString(), canvas.width - margin.right - 70, canvas.height - 12);
+      ctx.fillText(String(maxValue), 12, margin.top + 4);
+      ctx.fillText(String(minValue), 12, canvas.height - margin.bottom + 4);
+
+      legend.innerHTML = '';
+      for (const [clientId, series] of Object.entries(byClient)) {
+        const colour = colourForClient(clientId, clientOrder);
+        const legendItem = document.createElement('div');
+        legendItem.className = 'legend-item';
+        legendItem.innerHTML = `<span class="swatch" style="background:${colour}"></span><span>${clientId}</span>`;
+        legend.appendChild(legendItem);
+
+        ctx.strokeStyle = colour;
+        ctx.fillStyle = colour;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        series.forEach((point, index) => {
+          const x = margin.left + ((point.timestamp_unix_ms - minTime) / timeSpan) * width;
+          const y = margin.top + height - ((point.point - minValue) / valueSpan) * height;
+          if (index === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        });
+        ctx.stroke();
+
+        series.forEach((point) => {
+          const x = margin.left + ((point.timestamp_unix_ms - minTime) / timeSpan) * width;
+          const y = margin.top + height - ((point.point - minValue) / valueSpan) * height;
+          ctx.beginPath();
+          ctx.arc(x, y, 4, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+
+      meta.textContent = `Showing ${points.length} measurements across ${Object.keys(byClient).length} clients · refreshes every 2s`;
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch('/measurements.json', { cache: 'no-store' });
+        const data = await response.json();
+        draw(data);
+      } catch (error) {
+        meta.textContent = `Failed to load measurements: ${error}`;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>)HTML";
+}
+
+void WriteMeasurement(const StoredMeasurement& measurement) {
   std::ofstream myfile("result.txt", std::ios::app);
-  auto t = std::hash<std::thread::id>{}(std::this_thread::get_id());
   if (myfile.is_open()) {
-    myfile << result << " " << t << std::endl;
+    myfile << measurement.timestamp_unix_ms << " " << measurement.client_id << " "
+           << measurement.point << std::endl;
     myfile.close();
   }
 }
@@ -116,6 +308,9 @@ class SubscribeReactor : public grpc::ServerWriteReactor<Command> {
 // Logic and data behind the server's behavior.
 class MeasureServiceImpl final : public Measure::CallbackService {
  public:
+  explicit MeasureServiceImpl(size_t max_measurements)
+      : max_measurements_(max_measurements) {}
+
   void AddSubscriber(const std::string& client_id, SubscribeReactor* reactor) {
     std::lock_guard<std::mutex> lock(subscribers_mu_);
     subscribers_[client_id] = reactor;
@@ -128,12 +323,29 @@ class MeasureServiceImpl final : public Measure::CallbackService {
     std::cout << "Client unsubscribed: " << client_id << std::endl;
   }
 
+  std::vector<StoredMeasurement> GetMeasurementsSnapshot() const {
+    std::lock_guard<std::mutex> lock(measurements_mu_);
+    return std::vector<StoredMeasurement>(measurements_.begin(), measurements_.end());
+  }
+
  private:
   grpc::ServerUnaryReactor* RecordMeasurement(
       grpc::CallbackServerContext* context, const Measurement* request,
       Thumbs* reply) override {
     std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-    Write(request->point());
+    StoredMeasurement measurement{
+        request->client_id().empty() ? "unknown" : request->client_id(),
+        request->point(),
+        request->timestamp_unix_ms() > 0 ? request->timestamp_unix_ms()
+                                         : CurrentTimeMillis()};
+    {
+      std::lock_guard<std::mutex> lock(measurements_mu_);
+      measurements_.push_back(measurement);
+      while (measurements_.size() > max_measurements_) {
+        measurements_.pop_front();
+      }
+    }
+    WriteMeasurement(measurement);
     reply->set_response(0);
     auto* reactor = context->DefaultReactor();
     reactor->Finish(Status::OK);
@@ -203,6 +415,9 @@ class MeasureServiceImpl final : public Measure::CallbackService {
   std::mutex subscribers_mu_;
   std::map<std::string, SubscribeReactor*> subscribers_;
   int current_threshold_ = kDefaultThreshold;
+  size_t max_measurements_;
+  mutable std::mutex measurements_mu_;
+  std::deque<StoredMeasurement> measurements_;
 };
 
 // Out-of-line definitions that need MeasureServiceImpl to be complete.
@@ -231,9 +446,115 @@ void SubscribeReactor::OnDone() {
   delete this;
 }
 
-void RunServer(uint16_t port) {
+std::string BuildMeasurementsJson(const MeasureServiceImpl& service) {
+  std::vector<StoredMeasurement> measurements = service.GetMeasurementsSnapshot();
+  std::ostringstream json;
+  json << "{";
+  json << "\"measurements\":[";
+  for (size_t i = 0; i < measurements.size(); ++i) {
+    if (i > 0) json << ",";
+    json << "{"
+         << "\"client_id\":\"" << JsonEscape(measurements[i].client_id) << "\","
+         << "\"point\":" << measurements[i].point << ","
+         << "\"timestamp_unix_ms\":" << measurements[i].timestamp_unix_ms << "}";
+  }
+  json << "]}";
+  return json.str();
+}
+
+void SendHttpResponse(int client_fd, const std::string& status,
+                      const std::string& content_type,
+                      const std::string& body) {
+  std::ostringstream response;
+  response << "HTTP/1.1 " << status << "\r\n";
+  response << "Content-Type: " << content_type << "\r\n";
+  response << "Content-Length: " << body.size() << "\r\n";
+  response << "Cache-Control: no-store\r\n";
+  response << "Connection: close\r\n\r\n";
+  response << body;
+  const std::string response_text = response.str();
+  send(client_fd, response_text.data(), response_text.size(), 0);
+}
+
+void HandleHttpClient(int client_fd, const MeasureServiceImpl& service) {
+  char buffer[4096];
+  ssize_t received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+  if (received <= 0) return;
+  buffer[received] = '\0';
+  std::istringstream request(buffer);
+  std::string method;
+  std::string path;
+  std::string version;
+  request >> method >> path >> version;
+
+  if (method != "GET") {
+    SendHttpResponse(client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
+                     "Only GET is supported.\n");
+    return;
+  }
+
+  if (path == "/" || path == "/index.html") {
+    SendHttpResponse(client_fd, "200 OK", "text/html; charset=utf-8",
+                     BuildGraphHtml());
+    return;
+  }
+
+  if (path == "/measurements.json") {
+    SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
+                     BuildMeasurementsJson(service));
+    return;
+  }
+
+  SendHttpResponse(client_fd, "404 Not Found", "text/plain; charset=utf-8",
+                   "Not found.\n");
+}
+
+void RunHttpServer(uint16_t port, const MeasureServiceImpl& service) {
+  int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd < 0) {
+    std::cerr << "Failed to create HTTP socket" << std::endl;
+    return;
+  }
+
+  int opt = 1;
+  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(port);
+
+  if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
+    std::cerr << "Failed to bind HTTP server on " << kHttpBindAddress << ":"
+              << port << ": " << std::strerror(errno) << std::endl;
+    close(server_fd);
+    return;
+  }
+
+  if (listen(server_fd, 16) < 0) {
+    std::cerr << "Failed to listen on HTTP server: " << std::strerror(errno)
+              << std::endl;
+    close(server_fd);
+    return;
+  }
+
+  std::cout << "Graph UI available at http://" << kHttpBindAddress << ":" << port
+            << std::endl;
+
+  while (true) {
+    int client_fd = accept(server_fd, nullptr, nullptr);
+    if (client_fd < 0) {
+      std::cerr << "HTTP accept failed: " << std::strerror(errno) << std::endl;
+      continue;
+    }
+    HandleHttpClient(client_fd, service);
+    close(client_fd);
+  }
+}
+
+void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements) {
   std::string server_address = absl::StrFormat("0.0.0.0:%d", port);
-  MeasureServiceImpl service;
+  MeasureServiceImpl service(max_measurements);
 
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
@@ -242,12 +563,16 @@ void RunServer(uint16_t port) {
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
   std::cout << "Server listening on " << server_address << std::endl;
+  std::thread http_thread(RunHttpServer, http_port, std::cref(service));
+  http_thread.detach();
 
   server->Wait();
 }
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
-  RunServer(absl::GetFlag(FLAGS_port));
+  RunServer(absl::GetFlag(FLAGS_port), absl::GetFlag(FLAGS_http_port),
+            static_cast<size_t>(
+                std::max(1, absl::GetFlag(FLAGS_samples_retained))));
   return 0;
 }
