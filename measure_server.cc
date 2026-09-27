@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <atomic>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -185,7 +186,13 @@ std::string BuildGraphHtml() {
         const colour = colourForClient(clientId, clientOrder);
         const legendItem = document.createElement('div');
         legendItem.className = 'legend-item';
-        legendItem.innerHTML = `<span class="swatch" style="background:${colour}"></span><span>${clientId}</span>`;
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.background = colour;
+        const label = document.createElement('span');
+        label.textContent = clientId;
+        legendItem.appendChild(swatch);
+        legendItem.appendChild(label);
         legend.appendChild(legendItem);
 
         ctx.strokeStyle = colour;
@@ -462,6 +469,19 @@ std::string BuildMeasurementsJson(const MeasureServiceImpl& service) {
   return json.str();
 }
 
+bool SendAll(int client_fd, const std::string& data) {
+  size_t total_sent = 0;
+  while (total_sent < data.size()) {
+    ssize_t sent = send(client_fd, data.data() + total_sent,
+                        data.size() - total_sent, 0);
+    if (sent <= 0) {
+      return false;
+    }
+    total_sent += static_cast<size_t>(sent);
+  }
+  return true;
+}
+
 void SendHttpResponse(int client_fd, const std::string& status,
                       const std::string& content_type,
                       const std::string& body) {
@@ -473,19 +493,46 @@ void SendHttpResponse(int client_fd, const std::string& status,
   response << "Connection: close\r\n\r\n";
   response << body;
   const std::string response_text = response.str();
-  send(client_fd, response_text.data(), response_text.size(), 0);
+  SendAll(client_fd, response_text);
+}
+
+bool ReadHttpRequest(int client_fd, std::string* request_text) {
+  constexpr size_t kMaxHeaderBytes = 16 * 1024;
+  char buffer[1024];
+  request_text->clear();
+
+  while (request_text->find("\r\n\r\n") == std::string::npos) {
+    ssize_t received = recv(client_fd, buffer, sizeof(buffer), 0);
+    if (received <= 0) {
+      return false;
+    }
+    request_text->append(buffer, static_cast<size_t>(received));
+    if (request_text->size() > kMaxHeaderBytes) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void HandleHttpClient(int client_fd, const MeasureServiceImpl& service) {
-  char buffer[4096];
-  ssize_t received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-  if (received <= 0) return;
-  buffer[received] = '\0';
-  std::istringstream request(buffer);
+  std::string request_text;
+  if (!ReadHttpRequest(client_fd, &request_text)) {
+    SendHttpResponse(client_fd, "400 Bad Request", "text/plain; charset=utf-8",
+                     "Invalid request.\n");
+    return;
+  }
+
+  std::istringstream request(request_text);
   std::string method;
   std::string path;
   std::string version;
   request >> method >> path >> version;
+
+  if (method.empty() || path.empty() || version.empty()) {
+    SendHttpResponse(client_fd, "400 Bad Request", "text/plain; charset=utf-8",
+                     "Malformed request line.\n");
+    return;
+  }
 
   if (method != "GET") {
     SendHttpResponse(client_fd, "405 Method Not Allowed", "text/plain; charset=utf-8",
@@ -509,52 +556,91 @@ void HandleHttpClient(int client_fd, const MeasureServiceImpl& service) {
                    "Not found.\n");
 }
 
-void RunHttpServer(uint16_t port, const MeasureServiceImpl& service) {
-  int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd < 0) {
-    std::cerr << "Failed to create HTTP socket" << std::endl;
-    return;
-  }
+class HttpServer {
+ public:
+  HttpServer(uint16_t port, const MeasureServiceImpl& service)
+      : port_(port), service_(service) {}
 
-  int opt = 1;
-  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  void Start() { thread_ = std::thread(&HttpServer::Run, this); }
 
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  address.sin_port = htons(port);
-
-  if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
-    std::cerr << "Failed to bind HTTP server on " << kHttpBindAddress << ":"
-              << port << ": " << std::strerror(errno) << std::endl;
-    close(server_fd);
-    return;
-  }
-
-  if (listen(server_fd, 16) < 0) {
-    std::cerr << "Failed to listen on HTTP server: " << std::strerror(errno)
-              << std::endl;
-    close(server_fd);
-    return;
-  }
-
-  std::cout << "Graph UI available at http://" << kHttpBindAddress << ":" << port
-            << std::endl;
-
-  while (true) {
-    int client_fd = accept(server_fd, nullptr, nullptr);
-    if (client_fd < 0) {
-      std::cerr << "HTTP accept failed: " << std::strerror(errno) << std::endl;
-      continue;
+  void Stop() {
+    stop_requested_.store(true);
+    int server_fd = server_fd_.exchange(-1);
+    if (server_fd >= 0) {
+      shutdown(server_fd, SHUT_RDWR);
+      close(server_fd);
     }
-    HandleHttpClient(client_fd, service);
-    close(client_fd);
+    if (thread_.joinable()) {
+      thread_.join();
+    }
   }
-}
+
+ private:
+  void Run() {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+      std::cerr << "Failed to create HTTP socket" << std::endl;
+      return;
+    }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port_);
+
+    if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) <
+        0) {
+      std::cerr << "Failed to bind HTTP server on " << kHttpBindAddress << ":"
+                << port_ << ": " << std::strerror(errno) << std::endl;
+      close(server_fd);
+      return;
+    }
+
+    if (listen(server_fd, 16) < 0) {
+      std::cerr << "Failed to listen on HTTP server: " << std::strerror(errno)
+                << std::endl;
+      close(server_fd);
+      return;
+    }
+
+    server_fd_.store(server_fd);
+    std::cout << "Graph UI available at http://" << kHttpBindAddress << ":"
+              << port_ << std::endl;
+
+    while (!stop_requested_.load()) {
+      int client_fd = accept(server_fd, nullptr, nullptr);
+      if (client_fd < 0) {
+        if (stop_requested_.load()) {
+          break;
+        }
+        std::cerr << "HTTP accept failed: " << std::strerror(errno)
+                  << std::endl;
+        continue;
+      }
+      HandleHttpClient(client_fd, service_);
+      close(client_fd);
+    }
+
+    int owned_fd = server_fd_.exchange(-1);
+    if (owned_fd >= 0) {
+      close(owned_fd);
+    }
+  }
+
+  uint16_t port_;
+  const MeasureServiceImpl& service_;
+  std::atomic<bool> stop_requested_{false};
+  std::atomic<int> server_fd_{-1};
+  std::thread thread_;
+};
 
 void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements) {
   std::string server_address = absl::StrFormat("0.0.0.0:%d", port);
   MeasureServiceImpl service(max_measurements);
+  HttpServer http_server(http_port, service);
 
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
@@ -563,10 +649,10 @@ void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements) {
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
   std::cout << "Server listening on " << server_address << std::endl;
-  std::thread http_thread(RunHttpServer, http_port, std::cref(service));
-  http_thread.detach();
+  http_server.Start();
 
   server->Wait();
+  http_server.Stop();
 }
 
 int main(int argc, char** argv) {
