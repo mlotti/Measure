@@ -6,6 +6,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <chrono>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -60,6 +61,11 @@ class MeasureClient {
   int RecordMeasurement(int value) {
     Measurement measurement;
     measurement.set_point(value);
+    measurement.set_client_id(client_id_);
+    measurement.set_timestamp_unix_ms(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
     Thumbs thumbs;
     ClientContext context;
 
