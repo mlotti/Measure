@@ -53,6 +53,9 @@ elseif(GRPC_FETCHCONTENT)
   message(STATUS "Using gRPC via add_subdirectory (FetchContent).")
   include(FetchContent)
   set(MEASURE_GRPC_TAG "v1.62.2" CACHE STRING "gRPC tag used by FetchContent")
+  set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+  set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
+  set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(
     grpc
     GIT_REPOSITORY https://github.com/grpc/grpc.git
