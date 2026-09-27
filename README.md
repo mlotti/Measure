@@ -12,6 +12,15 @@ cmake -DCMAKE_PREFIX_PATH=$MY_INSTALL_DIR ../..
 make -j 4
 ```
 
+If protobuf and gRPC are not already installed locally, you can have CMake fetch
+them:
+```
+mkdir -p cmake/build
+pushd cmake/build
+cmake -DGRPC_FETCHCONTENT=ON ../..
+make -j 4
+```
+
 Run the server:
 ```
 ./measure_server --port=50051 --http_port=8080 --samples_retained=500
