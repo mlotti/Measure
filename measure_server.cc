@@ -472,8 +472,12 @@ std::string BuildMeasurementsJson(const MeasureServiceImpl& service) {
 bool SendAll(int client_fd, const std::string& data) {
   size_t total_sent = 0;
   while (total_sent < data.size()) {
+    int send_flags = 0;
+#ifdef MSG_NOSIGNAL
+    send_flags |= MSG_NOSIGNAL;
+#endif
     ssize_t sent = send(client_fd, data.data() + total_sent,
-                        data.size() - total_sent, 0);
+                        data.size() - total_sent, send_flags);
     if (sent <= 0) {
       return false;
     }
