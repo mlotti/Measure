@@ -38,6 +38,10 @@ target_link_libraries(m_grpc_proto
   ${_GRPC_GRPCPP}
   ${_PROTOBUF_LIBPROTOBUF})
 
+add_library(measurement_utils src/measurement_utils.cc)
+target_compile_features(measurement_utils PUBLIC cxx_std_17)
+target_include_directories(measurement_utils PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
 # Targets measure_[async_](client|server)
 foreach(_target
   measure_client measure_server)
@@ -53,3 +57,16 @@ foreach(_target
     ${_GRPC_GRPCPP}
     ${_PROTOBUF_LIBPROTOBUF})
 endforeach()
+target_link_libraries(measure_server PRIVATE measurement_utils)
+
+option(BUILD_TESTING "Build Measure tests" OFF)
+if(BUILD_TESTING)
+  include(FetchContent)
+  FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG        v3.8.1)
+  FetchContent_MakeAvailable(Catch2)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

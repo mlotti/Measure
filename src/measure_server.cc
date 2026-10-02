@@ -21,6 +21,7 @@
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/health_check_service_interface.h>
+#include "measurement_utils.h"
 
 #ifdef BAZEL_BUILD
 #include "measure.grpc.pb.h"
@@ -44,6 +45,7 @@ using measure::Command;
 using measure::Measure;
 using measure::Measurement;
 using measure::Mode;
+using measure::StoredMeasurement;
 using measure::Thumbs;
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
@@ -55,50 +57,10 @@ ABSL_FLAG(int, samples_retained, 500,
 constexpr int kDefaultThreshold = 8;
 constexpr char kHttpBindAddress[] = "127.0.0.1";
 
-struct StoredMeasurement {
-  std::string client_id;
-  int point;
-  int64_t timestamp_unix_ms;
-};
-
 int64_t CurrentTimeMillis() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
-}
-
-std::string JsonEscape(const std::string& value) {
-  std::string escaped;
-  escaped.reserve(value.size());
-  for (char c : value) {
-    switch (c) {
-      case '"':
-        escaped += "\\\"";
-        break;
-      case '\\':
-        escaped += "\\\\";
-        break;
-      case '\b':
-        escaped += "\\b";
-        break;
-      case '\f':
-        escaped += "\\f";
-        break;
-      case '\n':
-        escaped += "\\n";
-        break;
-      case '\r':
-        escaped += "\\r";
-        break;
-      case '\t':
-        escaped += "\\t";
-        break;
-      default:
-        escaped += c;
-        break;
-    }
-  }
-  return escaped;
 }
 
 std::string BuildGraphHtml() {
@@ -454,22 +416,6 @@ void SubscribeReactor::OnDone() {
   delete this;
 }
 
-std::string BuildMeasurementsJson(const MeasureServiceImpl& service) {
-  std::vector<StoredMeasurement> measurements = service.GetMeasurementsSnapshot();
-  std::ostringstream json;
-  json << "{";
-  json << "\"measurements\":[";
-  for (size_t i = 0; i < measurements.size(); ++i) {
-    if (i > 0) json << ",";
-    json << "{"
-         << "\"client_id\":\"" << JsonEscape(measurements[i].client_id) << "\","
-         << "\"point\":" << measurements[i].point << ","
-         << "\"timestamp_unix_ms\":" << measurements[i].timestamp_unix_ms << "}";
-  }
-  json << "]}";
-  return json.str();
-}
-
 bool SendAll(int client_fd, const std::string& data) {
   size_t total_sent = 0;
   while (total_sent < data.size()) {
@@ -553,7 +499,8 @@ void HandleHttpClient(int client_fd, const MeasureServiceImpl& service) {
 
   if (path == "/measurements.json") {
     SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
-                     BuildMeasurementsJson(service));
+                     measure::BuildMeasurementsJson(
+                         service.GetMeasurementsSnapshot()));
     return;
   }
 
