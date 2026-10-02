@@ -41,7 +41,8 @@ target_link_libraries(m_grpc_proto
 # Targets measure_[async_](client|server)
 foreach(_target
   measure_client measure_server)
-  add_executable(${_target} "${_target}.cc")
+  add_executable(${_target} "src/${_target}.cc")
+  target_compile_features(${_target} PRIVATE cxx_std_17)
   target_link_libraries(${_target}
     m_grpc_proto
     absl::check

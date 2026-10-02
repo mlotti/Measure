@@ -35,41 +35,41 @@ flowchart LR
 
 ### Option 1: use installed protobuf and gRPC
 
-Run `protoc`:
 ```bash
-protoc -I . --grpc_out=. --plugin=protoc-gen-grpc=`which grpc_cpp_plugin` ./measure.proto
-protoc -I . --cpp_out=. ./measure.proto
-```
-
-Build using `cmake`:
-```bash
-mkdir -p cmake/build
-pushd cmake/build
-cmake -DCMAKE_PREFIX_PATH=$MY_INSTALL_DIR ../..
-make -j 4
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$MY_INSTALL_DIR"
+cmake --build build --parallel 4
 ```
 
 ### Option 2: let CMake fetch protobuf and gRPC
 
 If protobuf and gRPC are not already installed locally:
 ```bash
-mkdir -p cmake/build
-pushd cmake/build
-cmake -DGRPC_FETCHCONTENT=ON ../..
-make -j 4
+cmake -S . -B build -DGRPC_FETCHCONTENT=ON
+cmake --build build --parallel 4
+```
+
+CMake generates the protobuf and gRPC sources as part of the build.
+
+## Tests
+
+Catch2 v3 tests are available through CTest. Enable them when configuring:
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build --parallel 4
+ctest --test-dir build --output-on-failure
 ```
 
 ## Run
 
 Start the server:
 ```bash
-./measure_server --port=50051 --http_port=8080 --samples_retained=500
+./build/measure_server --port=50051 --http_port=8080 --samples_retained=500
 ```
 
 Start one or more clients with different IDs:
 ```bash
-./measure_client --target=localhost:50051 --client_id=client1
-./measure_client --target=localhost:50051 --client_id=client2
+./build/measure_client --target=localhost:50051 --client_id=client1
+./build/measure_client --target=localhost:50051 --client_id=client2
 ```
 
 Open the graph page:
