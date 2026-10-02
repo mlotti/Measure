@@ -23,8 +23,11 @@ TEST_CASE("gRPC subscribers receive threshold and calibration commands") {
   auto stub = measure::Measure::NewStub(channel);
 
   grpc::ClientContext subscription_context;
-  auto reader = stub->Subscribe(&subscription_context,
-                                measure::ClientInfo{});
+  subscription_context.set_deadline(std::chrono::system_clock::now() +
+                                    std::chrono::seconds(5));
+  measure::ClientInfo client_info;
+  client_info.set_client_id("subscriber-1");
+  auto reader = stub->Subscribe(&subscription_context, client_info);
   measure::Command command;
   REQUIRE(reader->Read(&command));
   CHECK(command.threshold() == 8);

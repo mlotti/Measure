@@ -2,13 +2,10 @@
 #include <algorithm>
 #include <cerrno>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
-#include <vector>
 #include <atomic>
-#include <utility>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -26,7 +23,6 @@
 #include "measure.grpc.pb.h"
 #endif
 
-#include <chrono>
 #include <cstring>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -34,23 +30,12 @@
 
 using grpc::Server;
 using grpc::ServerBuilder;
-using grpc::Status;
-using measure::CalibrationRequest;
-using measure::CalibrationResponse;
-using measure::ClientInfo;
-using measure::Command;
-using measure::Measure;
-using measure::Measurement;
-using measure::Mode;
-using measure::Thumbs;
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 ABSL_FLAG(uint16_t, http_port, 8080, "HTTP port for the localhost graph UI");
 ABSL_FLAG(int, samples_retained, 500,
           "Maximum number of recent measurements retained for the graph");
 
-// Default threshold: only measurements above this value are stored.
-constexpr int kDefaultThreshold = 8;
 constexpr char kHttpBindAddress[] = "127.0.0.1";
 
 std::string BuildGraphHtml() {

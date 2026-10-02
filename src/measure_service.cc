@@ -91,8 +91,13 @@ class SubscribeReactor : public grpc::ServerWriteReactor<Command> {
   }
 
   void OnCancel() override {
-    std::lock_guard<std::mutex> lock(mu_);
-    done_ = true;
+    bool should_finish = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      done_ = true;
+      should_finish = !writing_;
+    }
+    if (should_finish) Finish(Status::CANCELLED);
   }
 
   void OnDone() override {
