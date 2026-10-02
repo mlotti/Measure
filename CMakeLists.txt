@@ -57,7 +57,7 @@ foreach(_target
     ${_GRPC_GRPCPP}
     ${_PROTOBUF_LIBPROTOBUF})
 endforeach()
-target_link_libraries(measure_server PRIVATE measurement_utils)
+target_link_libraries(measure_server measurement_utils)
 
 option(BUILD_TESTING "Build Measure tests" OFF)
 if(BUILD_TESTING)
