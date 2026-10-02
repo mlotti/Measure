@@ -42,6 +42,11 @@ add_library(measurement_utils src/measurement_utils.cc)
 target_compile_features(measurement_utils PUBLIC cxx_std_17)
 target_include_directories(measurement_utils PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+add_library(measure_service src/measure_service.cc)
+target_compile_features(measure_service PUBLIC cxx_std_17)
+target_include_directories(measure_service PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(measure_service m_grpc_proto)
+
 # Targets measure_[async_](client|server)
 foreach(_target
   measure_client measure_server)
@@ -57,7 +62,7 @@ foreach(_target
     ${_GRPC_GRPCPP}
     ${_PROTOBUF_LIBPROTOBUF})
 endforeach()
-target_link_libraries(measure_server measurement_utils)
+target_link_libraries(measure_server measurement_utils measure_service)
 
 option(BUILD_TESTING "Build Measure tests" OFF)
 if(BUILD_TESTING)

@@ -52,7 +52,10 @@ CMake generates the protobuf and gRPC sources as part of the build.
 
 ## Tests
 
-Catch2 v3 tests are available through CTest. Enable them when configuring:
+Catch2 v3 unit and gRPC integration tests are available through CTest. The
+integration tests verify that subscribers receive threshold and calibration
+commands and that measurement RPCs acknowledge and store measurements. Enable
+tests when configuring:
 ```bash
 cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build --parallel 4
