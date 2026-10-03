@@ -32,6 +32,15 @@ TEST_CASE("gRPC subscribers receive threshold and calibration commands") {
   REQUIRE(reader->Read(&command));
   CHECK(command.threshold() == 8);
   CHECK(command.mode() == measure::Mode::NORMAL);
+  const auto connected_clients = service.GetConnectedClients();
+  REQUIRE(connected_clients.size() == 1);
+  CHECK(connected_clients.front() == "subscriber-1");
+
+  service.SetThreshold(6);
+  CHECK(service.GetThreshold() == 6);
+  REQUIRE(reader->Read(&command));
+  CHECK(command.threshold() == 6);
+  CHECK(command.mode() == measure::Mode::NORMAL);
 
   measure::CalibrationRequest request;
   request.set_client_id("subscriber-1");
@@ -47,7 +56,7 @@ TEST_CASE("gRPC subscribers receive threshold and calibration commands") {
   CHECK(command.mode() == measure::Mode::CALIBRATION);
 
   REQUIRE(reader->Read(&command));
-  CHECK(command.threshold() == 8);
+  CHECK(command.threshold() == 6);
   CHECK(command.mode() == measure::Mode::NORMAL);
 
   subscription_context.TryCancel();

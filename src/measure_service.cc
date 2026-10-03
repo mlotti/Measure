@@ -118,6 +118,17 @@ class SubscribeReactor : public grpc::ServerWriteReactor<Command> {
 MeasureServiceImpl::MeasureServiceImpl(size_t max_measurements)
     : max_measurements_(max_measurements) {}
 
+MeasureServiceImpl::~MeasureServiceImpl() {
+  {
+    std::lock_guard<std::mutex> lock(calibration_mu_);
+    shutting_down_ = true;
+  }
+  calibration_cv_.notify_all();
+  for (auto& thread : calibration_threads_) {
+    if (thread.joinable()) thread.join();
+  }
+}
+
 void MeasureServiceImpl::AddSubscriber(const std::string& client_id,
                                        SubscribeReactor* reactor) {
   std::lock_guard<std::mutex> lock(subscribers_mu_);
@@ -136,6 +147,32 @@ std::vector<StoredMeasurement> MeasureServiceImpl::GetMeasurementsSnapshot()
   std::lock_guard<std::mutex> lock(measurements_mu_);
   return std::vector<StoredMeasurement>(measurements_.begin(),
                                         measurements_.end());
+}
+
+std::vector<std::string> MeasureServiceImpl::GetConnectedClients() const {
+  std::lock_guard<std::mutex> lock(subscribers_mu_);
+  std::vector<std::string> clients;
+  clients.reserve(subscribers_.size());
+  for (const auto& subscriber : subscribers_) {
+    clients.push_back(subscriber.first);
+  }
+  return clients;
+}
+
+int MeasureServiceImpl::GetThreshold() const {
+  std::lock_guard<std::mutex> lock(subscribers_mu_);
+  return current_threshold_;
+}
+
+void MeasureServiceImpl::SetThreshold(int threshold) {
+  std::lock_guard<std::mutex> lock(subscribers_mu_);
+  current_threshold_ = threshold;
+  Command cmd;
+  cmd.set_threshold(threshold);
+  cmd.set_mode(Mode::NORMAL);
+  for (auto& subscriber : subscribers_) {
+    subscriber.second->PushCommand(cmd);
+  }
 }
 
 grpc::ServerUnaryReactor* MeasureServiceImpl::RecordMeasurement(
@@ -163,43 +200,58 @@ grpc::ServerUnaryReactor* MeasureServiceImpl::RecordMeasurement(
 
 grpc::ServerWriteReactor<Command>* MeasureServiceImpl::Subscribe(
     grpc::CallbackServerContext* context, const ClientInfo* request) {
-  return new SubscribeReactor(request->client_id(), current_threshold_, this);
+  return new SubscribeReactor(request->client_id(), GetThreshold(), this);
 }
 
 grpc::ServerUnaryReactor* MeasureServiceImpl::SetCalibrationMode(
     grpc::CallbackServerContext* context, const CalibrationRequest* request,
     CalibrationResponse* reply) {
-  Command cal_cmd;
-  cal_cmd.set_threshold(0);
-  cal_cmd.set_mode(Mode::CALIBRATION);
-
-  if (!request->client_id().empty()) {
-    SendCommandToClient(request->client_id(), cal_cmd);
-  } else {
-    BroadcastCommand(cal_cmd);
-  }
-  std::cout << "Calibration started"
-            << (request->client_id().empty()
-                    ? " (all clients)"
-                    : " (client: " + request->client_id() + ")")
-            << " for " << request->duration_seconds() << "s" << std::endl;
-
-  int duration = request->duration_seconds() > 0 ? request->duration_seconds() : 10;
-  int revert_threshold = current_threshold_;
-  std::thread([this, duration, revert_threshold]() {
-    std::this_thread::sleep_for(std::chrono::seconds(duration));
-    Command normal_cmd;
-    normal_cmd.set_threshold(revert_threshold);
-    normal_cmd.set_mode(Mode::NORMAL);
-    BroadcastCommand(normal_cmd);
-    std::cout << "Calibration ended, threshold restored to " << revert_threshold
-              << std::endl;
-  }).detach();
-
+  StartCalibration(request->client_id(), request->duration_seconds());
   reply->set_accepted(true);
   auto* reactor = context->DefaultReactor();
   reactor->Finish(Status::OK);
   return reactor;
+}
+
+void MeasureServiceImpl::StartCalibration(const std::string& client_id,
+                                          int duration_seconds) {
+  std::lock_guard<std::mutex> lock(calibration_mu_);
+  if (shutting_down_) return;
+
+  Command cal_cmd;
+  cal_cmd.set_threshold(0);
+  cal_cmd.set_mode(Mode::CALIBRATION);
+
+  if (!client_id.empty()) {
+    SendCommandToClient(client_id, cal_cmd);
+  } else {
+    BroadcastCommand(cal_cmd);
+  }
+  std::cout << "Calibration started"
+            << (client_id.empty()
+                    ? " (all clients)"
+                    : " (client: " + client_id + ")")
+            << " for " << duration_seconds << "s" << std::endl;
+
+  int duration = duration_seconds > 0 ? duration_seconds : 10;
+  calibration_threads_.emplace_back([this, duration, client_id]() {
+    std::unique_lock<std::mutex> lock(calibration_mu_);
+    if (calibration_cv_.wait_for(lock, std::chrono::seconds(duration),
+                                 [this]() { return shutting_down_; })) {
+      return;
+    }
+    lock.unlock();
+    Command normal_cmd;
+    normal_cmd.set_threshold(GetThreshold());
+    normal_cmd.set_mode(Mode::NORMAL);
+    if (client_id.empty()) {
+      BroadcastCommand(normal_cmd);
+    } else {
+      SendCommandToClient(client_id, normal_cmd);
+    }
+    std::cout << "Calibration ended, threshold restored to "
+              << normal_cmd.threshold() << std::endl;
+  });
 }
 
 void MeasureServiceImpl::BroadcastCommand(const Command& cmd) {
