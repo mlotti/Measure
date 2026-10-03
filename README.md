@@ -34,6 +34,26 @@ flowchart LR
 
 ## Build
 
+### Build the dashboard frontend
+
+The React dashboard is a separate app in `dashboard/`. Build its static files
+before starting the C++ server:
+
+```bash
+cd dashboard
+npm ci
+npm run build
+cd ..
+```
+
+For UI development, run the C++ server in one terminal and the Vite dev server
+in another. The Vite server proxies `/api` requests to the local C++ server:
+
+```bash
+cd dashboard
+npm run dev
+```
+
 ### Option 1: use installed protobuf and gRPC
 
 ```bash
@@ -69,6 +89,9 @@ Start the server:
 ```bash
 ./build/measure_server --port=50051 --http_port=8080 --samples_retained=500
 ```
+
+The server serves the built React app from `dashboard/dist`. Use
+`--web_root=/path/to/dashboard/dist` to select another frontend build directory.
 
 Start one or more clients with different IDs:
 ```bash
