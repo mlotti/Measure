@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import './App.css'
 
 type Device = {
@@ -146,8 +146,7 @@ function App() {
   const [target, setTarget] = useState('')
   const [duration, setDuration] = useState('10')
   const [dragged, setDragged] = useState<string | null>(null)
-  const [now, setNow] = useState(new Date())
-  const chartEvents = useRef<Event[]>([])
+  const [now, setNow] = useState<number | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -156,17 +155,17 @@ function App() {
       const current = await response.json() as DashboardData
       setData(current)
       setThreshold(value => value === String(data.threshold) ? String(current.threshold) : value)
-      chartEvents.current = current.events
     } catch (error) {
       setNotice(`Dashboard refresh failed: ${String(error)}`)
     }
   }, [data.threshold])
 
   useEffect(() => {
-    void refresh()
+    const initial = window.setTimeout(() => void refresh(), 0)
     const poll = window.setInterval(() => void refresh(), 2000)
-    const clock = window.setInterval(() => setNow(new Date()), 1000)
+    const clock = window.setInterval(() => setNow(Date.now()), 1000)
     return () => {
+      window.clearTimeout(initial)
       window.clearInterval(poll)
       window.clearInterval(clock)
     }
@@ -310,7 +309,8 @@ function App() {
         <nav className="breadcrumbs" aria-label="Dashboard navigation">
           <span>▦　Fleet</span><b>›</b><span>▱　Devices</span><b>›</b><span>⌁　Activity</span><b>›</b><span>⚙　Operations</span>
         </nav>
-        <div className="clock"><strong>◷　{now.toLocaleTimeString([], { timeZone: 'UTC', timeZoneName: 'short' })}</strong><span>{now.toLocaleTimeString()} Local</span></div>
+        <div className="clock">        <strong>◷　{now ? new Date(now).toLocaleTimeString([], { timeZone: 'UTC', timeZoneName: 'short' }) : '— UTC'}</strong>
+        <span>{now ? new Date(now).toLocaleTimeString() : '— Local'}</span></div>
         <button className="more-button" aria-label="More options">⋮</button>
       </header>
       <main className="dashboard-layout">
