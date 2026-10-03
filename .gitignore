@@ -1,6 +1,8 @@
 # Build directories
 cmake/build/
 build/
+dashboard/node_modules/
+dashboard/dist/
 
 # CMake generated files
 CMakeCache.txt

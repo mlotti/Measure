@@ -62,6 +62,7 @@ foreach(_target
     ${_GRPC_GRPCPP}
     ${_PROTOBUF_LIBPROTOBUF})
 endforeach()
+target_sources(measure_server PRIVATE src/dashboard_server.cc)
 target_link_libraries(measure_server measurement_utils measure_service)
 
 option(BUILD_TESTING "Build Measure tests" OFF)
