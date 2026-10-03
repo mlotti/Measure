@@ -355,7 +355,15 @@ void ServeStaticFile(int client_fd, const std::string& request_path,
                        "text/plain; charset=utf-8", "Not found.\n");
       return;
     }
-    file = root / "index.html";
+    error.clear();
+    file = std::filesystem::weakly_canonical(root / "index.html", error);
+    if (error || !IsInsideRoot(root, file) ||
+        !std::filesystem::is_regular_file(file)) {
+      SendHttpResponse(client_fd, "404 Not Found",
+                       "text/plain; charset=utf-8",
+                       "Dashboard build not found. Run npm run build in dashboard/.\n");
+      return;
+    }
   }
 
   std::ifstream input(file, std::ios::binary);
