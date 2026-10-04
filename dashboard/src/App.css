@@ -27,21 +27,10 @@
   font-size: 26px;
 }
 
-.brand-mark {
-  width: 83px;
-  height: 83px;
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  border: 2px solid #f6c55b;
-  color: #2196ed;
-  background: linear-gradient(145deg, #fff 0 50%, #f6d957 51% 66%, #ec7f5b 67%);
-  font: italic 46px Georgia, serif;
-}
-
 .brand {
   display: grid;
   flex: 0 0 auto;
+  min-width: 150px;
   line-height: 1.15;
 }
 
@@ -320,11 +309,6 @@
     font-size: 24px;
   }
 
-  .brand-mark {
-    width: 65px;
-    height: 65px;
-    font-size: 36px;
-  }
 }
 
 @media (max-width: 900px) {
@@ -332,12 +316,6 @@
     min-height: 70px;
     gap: 10px;
     padding: 6px 12px;
-  }
-
-  .brand-mark {
-    width: 50px;
-    height: 50px;
-    font-size: 29px;
   }
 
   .brand strong {

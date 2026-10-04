@@ -304,7 +304,6 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <button className="menu-button" aria-label="Open navigation">☰</button>
-        <div className="brand-mark" aria-hidden="true">M</div>
         <div className="brand"><strong>Measure</strong><span>Online</span></div>
         <nav className="breadcrumbs" aria-label="Dashboard navigation">
           <span>▦　Fleet</span><b>›</b><span>▱　Devices</span><b>›</b><span>⌁　Activity</span><b>›</b><span>⚙　Operations</span>
