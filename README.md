@@ -3,15 +3,16 @@
 `Measure` is a small gRPC-based measurement system:
 - one server accepts measurements from multiple clients
 - each client can subscribe to server-pushed threshold commands
-- the server exposes a localhost-only graph page that shows recent measurements
-- each client is drawn in a different colour on the graph
+- the server exposes a localhost-only fleet dashboard for device status,
+  threshold configuration, calibration, measurement charts, and recent events
+- dashboard panels can be rearranged with drag and drop
 
 ## Overview
 
 Clients generate measurements and, in the current sample client, send values
 above the active threshold to the server. The server stores every received
 measurement in a bounded in-memory history, appends it to `result.txt`, and
-serves a simple graph UI on localhost.
+serves an operator dashboard on localhost.
 
 ## Architecture
 
@@ -21,17 +22,37 @@ flowchart LR
   C2[Client: client2]
   C3[Client: client3]
   S[gRPC Server<br/>measure_server]
-  G[Local graph UI<br/>http://127.0.0.1:8080]
+  G[Local fleet dashboard<br/>http://127.0.0.1:8080]
   F[result.txt]
 
   C1 -->|RecordMeasurement / Subscribe| S
   C2 -->|RecordMeasurement / Subscribe| S
   C3 -->|RecordMeasurement / Subscribe| S
-  S -->|recent aggregated measurements| G
+  S -->|fleet status, controls, and history| G
   S -->|append timestamp client_id point| F
 ```
 
 ## Build
+
+### Build the dashboard frontend
+
+The React dashboard is a separate app in `dashboard/`. Build its static files
+before starting the C++ server:
+
+```bash
+cd dashboard
+npm ci
+npm run build
+cd ..
+```
+
+For UI development, run the C++ server in one terminal and the Vite dev server
+in another. The Vite server proxies `/api` requests to the local C++ server:
+
+```bash
+cd dashboard
+npm run dev
+```
 
 ### Option 1: use installed protobuf and gRPC
 
@@ -69,37 +90,59 @@ Start the server:
 ./build/measure_server --port=50051 --http_port=8080 --samples_retained=500
 ```
 
+The server serves the built React app from `dashboard/dist`. Use
+`--web_root=/path/to/dashboard/dist` to select another frontend build directory.
+
 Start one or more clients with different IDs:
 ```bash
 ./build/measure_client --target=localhost:50051 --client_id=client1
 ./build/measure_client --target=localhost:50051 --client_id=client2
 ```
 
-Open the graph page:
+Open the fleet dashboard:
 ```text
 http://127.0.0.1:8080/
 ```
 
-## What the graph shows
+## Dashboard
 
-- one combined graph for all connected clients
-- one colour per client
-- recent measurements only, bounded by `--samples_retained`
-- periodic refresh every 2 seconds
+The dashboard provides:
 
-The graph data comes from the server endpoint:
+- connected/offline device status, latest reading, and last-seen time
+- fleet-wide threshold updates pushed to subscribed clients
+- calibration for all connected clients or one selected device
+- recent measurement chart and event history
+- draggable dashboard panels; their order is saved in the browser
+
+The dashboard and its control endpoints are bound to localhost only. Mutating
+requests require a same-origin request from the dashboard.
+
+The dashboard data is available from:
+
 ```text
-http://127.0.0.1:8080/measurements.json
+GET  http://127.0.0.1:8080/api/dashboard
+POST http://127.0.0.1:8080/api/threshold
+POST http://127.0.0.1:8080/api/calibration
+```
+
+Threshold and calibration requests use URL-encoded form fields. For example,
+from the dashboard origin:
+
+```text
+threshold=5
+client_id=client1&duration_seconds=10
 ```
 
 ## Data and behavior notes
 
-- The graph UI is only exposed on localhost.
+- The dashboard is only exposed on localhost.
 - Each recorded measurement includes:
   - `point`
   - `client_id`
   - `timestamp_unix_ms`
-- The server keeps a bounded in-memory history for the graph.
+- The server keeps a bounded in-memory history for the dashboard and event list.
 - The server also appends measurements to `result.txt` as:
   - `timestamp client_id point`
 - Clients subscribe to threshold updates from the server using gRPC streaming.
+- The threshold is shared by all clients; calibration can target one connected
+  client or all clients.
