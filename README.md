@@ -81,7 +81,7 @@ integration tests verify that subscribers receive threshold and calibration
 commands and that measurement RPCs acknowledge and store measurements. Enable
 tests when configuring:
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON
+cmake -S . -B build -DBUILD_TESTING=ON -DGRPC_FETCHCONTENT=ON
 cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
 ```
