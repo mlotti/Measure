@@ -72,6 +72,8 @@ cmake --build build --parallel 4
 
 CMake generates the protobuf and gRPC sources as part of the build.
 
+The build also requires the SQLite3 development headers and library.
+
 ## Tests
 
 Catch2 v3 unit and gRPC integration tests are available through CTest. The

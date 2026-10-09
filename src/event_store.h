@@ -12,6 +12,12 @@ struct sqlite3;
 
 namespace measure {
 
+struct StoredMeasurement {
+  std::string client_id;
+  int point;
+  int64_t timestamp_unix_ms;
+};
+
 struct StoredEvent {
   int64_t id;
   std::string event_type;
@@ -47,6 +53,7 @@ class EventStore {
                    std::optional<int> threshold = std::nullopt,
                    const std::string& mode = "");
   std::vector<StoredMeasurement> GetMeasurements(size_t limit) const;
+  std::vector<StoredMeasurement> GetLatestMeasurements() const;
   std::vector<StoredEvent> GetEvents(size_t limit, int64_t since_unix_ms = 0,
                                      int64_t until_unix_ms = 0,
                                      const std::string& client_id = "") const;

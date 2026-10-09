@@ -185,7 +185,9 @@ function App() {
     try {
       const since = rangeStart(historyRange)
       const query = `since_ms=${since}&limit=1000`
-      const bucket = historyRange === '1h' ? 300000 : historyRange === '7d' ? 3600000 : 60000
+      const bucket = historyRange === '1h' ? 60000
+        : historyRange === '7d' ? 3600000
+          : historyRange === 'all' ? 86400000 : 900000
       const [response, historyResponse, trendsResponse] = await Promise.all([
         fetch('/api/dashboard', { cache: 'no-store' }),
         fetch(`/api/history?${query}`, { cache: 'no-store' }),
@@ -353,11 +355,11 @@ function App() {
                   <option value="1h">Last hour</option>
                   <option value="24h">Last 24 hours</option>
                   <option value="7d">Last 7 days</option>
-                  <option value="all">All retained history</option>
+                  <option value="all">All history (latest 1,000 events)</option>
                 </select>
               </label>
-              <a href={`/api/export?format=csv${exportQuery}`}>Export CSV</a>
-              <a href={`/api/export?format=json${exportQuery}`}>Export JSON</a>
+              <a href={`/api/export?format=csv${exportQuery}`} download="measure-events.csv">Export CSV</a>
+              <a href={`/api/export?format=json${exportQuery}`} download="measure-events.json">Export JSON</a>
             </div>
             <div className="table-scroll history">
               <table><thead><tr><th>Time</th><th>Event</th><th>Device</th><th>Value</th></tr></thead>

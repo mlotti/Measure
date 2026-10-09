@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cctype>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -227,109 +228,13 @@ void SendApiError(int client_fd, const std::string& status,
 
 std::string BuildDashboardJson(const MeasureServiceImpl& service) {
   const auto measurements = service.GetMeasurementsSnapshot();
+  const auto latest_measurements = service.GetLatestMeasurementsSnapshot();
   const auto connected = service.GetConnectedClients();
   std::set<std::string> client_ids(connected.begin(), connected.end());
   std::map<std::string, measure::StoredMeasurement> latest;
-  for (const auto& measurement : measurements) {
+  for (const auto& measurement : latest_measurements) {
     client_ids.insert(measurement.client_id);
     latest[measurement.client_id] = measurement;
-  }
-
-  std::string BuildEventsJson(const std::vector<measure::StoredEvent>& events) {
-    std::string json = "{\"events\":[";
-    for (size_t i = 0; i < events.size(); ++i) {
-      if (i > 0) json += ",";
-      const auto& event = events[i];
-      json += "{\"id\":" + std::to_string(event.id) +
-              ",\"event_type\":\"" + measure::JsonEscape(event.event_type) +
-              "\",\"timestamp_unix_ms\":" +
-              std::to_string(event.timestamp_unix_ms) + ",\"client_id\":\"" +
-              measure::JsonEscape(event.client_id) + "\",\"point\":";
-      json += event.point.has_value() ? std::to_string(*event.point) : "null";
-      json += ",\"threshold\":";
-      json += event.threshold.has_value() ? std::to_string(*event.threshold) : "null";
-      json += ",\"mode\":\"" + measure::JsonEscape(event.mode) +
-              "\",\"payload\":" + event.payload_json + "}";
-    }
-    json += "]}";
-    return json;
-  }
-
-  std::string BuildTrendsJson(
-      const std::vector<measure::MeasurementTrend>& trends) {
-    std::string json = "{\"trends\":[";
-    for (size_t i = 0; i < trends.size(); ++i) {
-      if (i > 0) json += ",";
-      const auto& trend = trends[i];
-      json += "{\"client_id\":\"" + measure::JsonEscape(trend.client_id) +
-              "\",\"bucket_start_unix_ms\":" +
-              std::to_string(trend.bucket_start_unix_ms) +
-              ",\"count\":" + std::to_string(trend.count) +
-              ",\"average\":" + std::to_string(trend.average) +
-              ",\"minimum\":" + std::to_string(trend.minimum) +
-              ",\"maximum\":" + std::to_string(trend.maximum) + "}";
-    }
-    json += "]}";
-    return json;
-  }
-
-  bool ParseHistoryQuery(const std::string& request_path,
-                         std::map<std::string, std::string>* query,
-                         int64_t* since, int64_t* until, std::string* client,
-                         size_t* limit, size_t default_limit,
-                         size_t maximum_limit) {
-    if (!ParseQuery(request_path, query)) return false;
-    *since = 0;
-    *until = 0;
-    *client = "";
-    *limit = default_limit;
-    if (query->count("since_ms") && !ParseInteger64(*query, "since_ms", since)) {
-      return false;
-    }
-    if (query->count("until_ms") && !ParseInteger64(*query, "until_ms", until)) {
-      return false;
-    }
-    if (*since < 0 || *until < 0 || (*since > 0 && *until > 0 && *until < *since)) {
-      return false;
-    }
-    if (const auto it = query->find("client_id"); it != query->end()) {
-      *client = it->second;
-    }
-    if (query->count("limit")) {
-      int64_t parsed_limit = 0;
-      if (!ParseInteger64(*query, "limit", &parsed_limit) || parsed_limit < 1 ||
-          static_cast<uint64_t>(parsed_limit) > maximum_limit) {
-        return false;
-      }
-      *limit = static_cast<size_t>(parsed_limit);
-    }
-    return true;
-  }
-
-  std::string CsvField(const std::string& field) {
-    std::string escaped = "\"";
-    for (char character : field) {
-      if (character == '"') escaped += '"';
-      escaped += character;
-    }
-    escaped += '"';
-    return escaped;
-  }
-
-  std::string BuildEventsCsv(const std::vector<measure::StoredEvent>& events) {
-    std::string csv =
-        "id,event_type,timestamp_unix_ms,client_id,point,threshold,mode,payload\n";
-    for (const auto& event : events) {
-      csv += std::to_string(event.id) + "," + CsvField(event.event_type) + "," +
-             std::to_string(event.timestamp_unix_ms) + "," +
-             CsvField(event.client_id) + ",";
-      csv += event.point.has_value() ? std::to_string(*event.point) : "";
-      csv += ",";
-      csv += event.threshold.has_value() ? std::to_string(*event.threshold) : "";
-      csv += "," + CsvField(event.mode) + "," + CsvField(event.payload_json) +
-             "\r\n";
-    }
-    return csv;
   }
 
   std::string json =
@@ -365,6 +270,111 @@ std::string BuildDashboardJson(const MeasureServiceImpl& service) {
   }
   json += "]}";
   return json;
+}
+
+std::string BuildEventsJson(const std::vector<measure::StoredEvent>& events) {
+  std::string json = "{\"events\":[";
+  for (size_t i = 0; i < events.size(); ++i) {
+    if (i > 0) json += ",";
+    const auto& event = events[i];
+    json += "{\"id\":" + std::to_string(event.id) +
+            ",\"event_type\":\"" + measure::JsonEscape(event.event_type) +
+            "\",\"timestamp_unix_ms\":" +
+            std::to_string(event.timestamp_unix_ms) + ",\"client_id\":\"" +
+            measure::JsonEscape(event.client_id) + "\",\"point\":";
+    json += event.point.has_value() ? std::to_string(*event.point) : "null";
+    json += ",\"threshold\":";
+    json += event.threshold.has_value() ? std::to_string(*event.threshold) : "null";
+    json += ",\"mode\":\"" + measure::JsonEscape(event.mode) +
+            "\",\"payload\":" + event.payload_json + "}";
+  }
+  json += "]}";
+  return json;
+}
+
+std::string BuildTrendsJson(
+    const std::vector<measure::MeasurementTrend>& trends) {
+  std::string json = "{\"trends\":[";
+  for (size_t i = 0; i < trends.size(); ++i) {
+    if (i > 0) json += ",";
+    const auto& trend = trends[i];
+    json += "{\"client_id\":\"" + measure::JsonEscape(trend.client_id) +
+            "\",\"bucket_start_unix_ms\":" +
+            std::to_string(trend.bucket_start_unix_ms) +
+            ",\"count\":" + std::to_string(trend.count) +
+            ",\"average\":" + std::to_string(trend.average) +
+            ",\"minimum\":" + std::to_string(trend.minimum) +
+            ",\"maximum\":" + std::to_string(trend.maximum) + "}";
+  }
+  json += "]}";
+  return json;
+}
+
+bool ParseHistoryQuery(const std::string& request_path,
+                       std::map<std::string, std::string>* query,
+                       int64_t* since, int64_t* until, std::string* client,
+                       size_t* limit, size_t default_limit,
+                       size_t maximum_limit) {
+  if (!ParseQuery(request_path, query)) return false;
+  *since = 0;
+  *until = 0;
+  *client = "";
+  *limit = default_limit;
+  if (query->count("since_ms") && !ParseInteger64(*query, "since_ms", since)) {
+    return false;
+  }
+  if (query->count("until_ms") && !ParseInteger64(*query, "until_ms", until)) {
+    return false;
+  }
+  if (*since < 0 || *until < 0 ||
+      (*since > 0 && *until > 0 && *until < *since)) {
+    return false;
+  }
+  if (const auto it = query->find("client_id"); it != query->end()) {
+    *client = it->second;
+  }
+  if (query->count("limit")) {
+    int64_t parsed_limit = 0;
+    if (!ParseInteger64(*query, "limit", &parsed_limit) || parsed_limit < 1 ||
+        static_cast<uint64_t>(parsed_limit) > maximum_limit) {
+      return false;
+    }
+    *limit = static_cast<size_t>(parsed_limit);
+  }
+  return true;
+}
+
+std::string CsvField(const std::string& field) {
+  std::string value = field;
+  const size_t first = value.find_first_not_of(" \t\r\n");
+  if (first != std::string::npos &&
+      (value[first] == '=' || value[first] == '+' || value[first] == '-' ||
+       value[first] == '@')) {
+    value.insert(0, "'");
+  }
+  std::string escaped = "\"";
+  for (char character : value) {
+    if (character == '"') escaped += '"';
+    escaped += character;
+  }
+  escaped += '"';
+  return escaped;
+}
+
+std::string BuildEventsCsv(const std::vector<measure::StoredEvent>& events) {
+  std::string csv =
+      "id,event_type,timestamp_unix_ms,client_id,point,threshold,mode,payload\n";
+  for (const auto& event : events) {
+    csv += std::to_string(event.id) + "," + CsvField(event.event_type) + "," +
+           std::to_string(event.timestamp_unix_ms) + "," +
+           CsvField(event.client_id) + ",";
+    csv += event.point.has_value() ? std::to_string(*event.point) : "";
+    csv += ",";
+    csv += event.threshold.has_value() ? std::to_string(*event.threshold) : "";
+    csv += "," + CsvField(event.mode) + "," + CsvField(event.payload_json) +
+           "\r\n";
+  }
+  return csv;
 }
 
 void HandlePost(int client_fd, const HttpRequest& request,

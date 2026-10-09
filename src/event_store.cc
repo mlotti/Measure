@@ -15,6 +15,7 @@ class Statement {
   Statement(sqlite3* database, const char* sql) : database_(database) {
     if (sqlite3_prepare_v2(database, sql, -1, &statement_, nullptr) !=
         SQLITE_OK) {
+      sqlite3_finalize(statement_);
       throw std::runtime_error(sqlite3_errmsg(database));
     }
   }
@@ -114,6 +115,9 @@ EventStore::EventStore(const std::string& path, int retention_days)
     Execute(database_,
             "CREATE INDEX IF NOT EXISTS events_client_time "
             "ON events(client_id, timestamp_unix_ms, id)");
+    Execute(database_,
+            "CREATE TABLE IF NOT EXISTS settings ("
+            "key TEXT PRIMARY KEY, integer_value INTEGER NOT NULL)");
     Execute(database_, "PRAGMA user_version=1");
     PruneExpiredEvents();
   } catch (...) {
@@ -142,27 +146,44 @@ void EventStore::RecordEvent(const std::string& event_type,
                              std::optional<int> threshold,
                              const std::string& mode) {
   std::lock_guard<std::mutex> lock(mutex_);
-  Statement statement(
-      database_,
-      "INSERT INTO events(event_type, timestamp_unix_ms, client_id, point, "
-      "threshold, mode, payload_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
-  BindText(statement.get(), 1, event_type);
-  statement.Check(sqlite3_bind_int64(statement.get(), 2, timestamp_unix_ms));
-  BindText(statement.get(), 3, client_id);
-  if (point.has_value()) {
-    statement.Check(sqlite3_bind_int(statement.get(), 4, *point));
-  } else {
-    statement.Check(sqlite3_bind_null(statement.get(), 4));
+  Execute(database_, "BEGIN IMMEDIATE");
+  try {
+    {
+      Statement statement(
+          database_,
+          "INSERT INTO events(event_type, timestamp_unix_ms, client_id, point, "
+          "threshold, mode, payload_json) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+      BindText(statement.get(), 1, event_type);
+      statement.Check(sqlite3_bind_int64(statement.get(), 2, timestamp_unix_ms));
+      BindText(statement.get(), 3, client_id);
+      if (point.has_value()) {
+        statement.Check(sqlite3_bind_int(statement.get(), 4, *point));
+      } else {
+        statement.Check(sqlite3_bind_null(statement.get(), 4));
+      }
+      if (threshold.has_value()) {
+        statement.Check(sqlite3_bind_int(statement.get(), 5, *threshold));
+      } else {
+        statement.Check(sqlite3_bind_null(statement.get(), 5));
+      }
+      BindText(statement.get(), 6, mode);
+      BindText(statement.get(), 7, payload_json);
+      statement.Step();
+    }
+    if (event_type == "threshold" && threshold.has_value()) {
+      Statement statement(
+          database_,
+          "INSERT OR REPLACE INTO settings(key, integer_value) "
+          "VALUES('threshold', ?1)");
+      statement.Check(sqlite3_bind_int(statement.get(), 1, *threshold));
+      statement.Step();
+    }
+    PruneExpiredEvents();
+    Execute(database_, "COMMIT");
+  } catch (...) {
+    sqlite3_exec(database_, "ROLLBACK", nullptr, nullptr, nullptr);
+    throw;
   }
-  if (threshold.has_value()) {
-    statement.Check(sqlite3_bind_int(statement.get(), 5, *threshold));
-  } else {
-    statement.Check(sqlite3_bind_null(statement.get(), 5));
-  }
-  BindText(statement.get(), 6, mode);
-  BindText(statement.get(), 7, payload_json);
-  statement.Step();
-  PruneExpiredEvents();
 }
 
 std::vector<StoredMeasurement> EventStore::GetMeasurements(size_t limit) const {
@@ -170,12 +191,37 @@ std::vector<StoredMeasurement> EventStore::GetMeasurements(size_t limit) const {
   Statement statement(
       database_,
       "SELECT client_id, point, timestamp_unix_ms FROM "
-      "(SELECT client_id, point, timestamp_unix_ms FROM events "
+      "(SELECT client_id, point, timestamp_unix_ms, id FROM events "
       "WHERE event_type = 'measurement' AND point IS NOT NULL "
       "ORDER BY timestamp_unix_ms DESC, id DESC LIMIT ?1) "
-      "ORDER BY timestamp_unix_ms ASC");
+      "ORDER BY timestamp_unix_ms ASC, id ASC");
   statement.Check(sqlite3_bind_int64(
       statement.get(), 1, static_cast<sqlite3_int64>(limit)));
+  std::vector<StoredMeasurement> measurements;
+  int result = SQLITE_OK;
+  while ((result = sqlite3_step(statement.get())) == SQLITE_ROW) {
+    measurements.push_back({ColumnText(statement.get(), 0),
+                            sqlite3_column_int(statement.get(), 1),
+                            sqlite3_column_int64(statement.get(), 2)});
+  }
+  if (result != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(database_));
+  }
+  return measurements;
+}
+
+std::vector<StoredMeasurement> EventStore::GetLatestMeasurements() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Statement statement(
+      database_,
+      "SELECT event.client_id, event.point, event.timestamp_unix_ms FROM "
+      "events AS event WHERE event.event_type = 'measurement' "
+      "AND event.point IS NOT NULL AND NOT EXISTS ("
+      "SELECT 1 FROM events AS newer WHERE newer.event_type = 'measurement' "
+      "AND newer.client_id = event.client_id "
+      "AND (newer.timestamp_unix_ms > event.timestamp_unix_ms OR "
+      "(newer.timestamp_unix_ms = event.timestamp_unix_ms AND newer.id > "
+      "event.id))) ORDER BY event.client_id");
   std::vector<StoredMeasurement> measurements;
   int result = SQLITE_OK;
   while ((result = sqlite3_step(statement.get())) == SQLITE_ROW) {
@@ -272,12 +318,20 @@ int EventStore::GetLatestThreshold(int fallback) const {
   std::lock_guard<std::mutex> lock(mutex_);
   Statement statement(
       database_,
-      "SELECT threshold FROM events WHERE event_type = 'threshold' "
-      "AND threshold IS NOT NULL ORDER BY timestamp_unix_ms DESC, id DESC "
-      "LIMIT 1");
+      "SELECT integer_value FROM settings WHERE key = 'threshold'");
   const int result = sqlite3_step(statement.get());
   if (result == SQLITE_ROW) return sqlite3_column_int(statement.get(), 0);
   if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(database_));
+  Statement latest(
+      database_,
+      "SELECT threshold FROM events WHERE event_type = 'threshold' "
+      "AND threshold IS NOT NULL ORDER BY timestamp_unix_ms DESC, id DESC "
+      "LIMIT 1");
+  const int latest_result = sqlite3_step(latest.get());
+  if (latest_result == SQLITE_ROW) return sqlite3_column_int(latest.get(), 0);
+  if (latest_result != SQLITE_DONE) {
+    throw std::runtime_error(sqlite3_errmsg(database_));
+  }
   return fallback;
 }
 

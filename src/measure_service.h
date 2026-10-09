@@ -12,7 +12,6 @@
 #include <grpcpp/grpcpp.h>
 #include "measure.grpc.pb.h"
 #include "event_store.h"
-#include "measurement_utils.h"
 
 class SubscribeReactor;
 
@@ -26,6 +25,7 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
   void AddSubscriber(const std::string& client_id, SubscribeReactor* reactor);
   void RemoveSubscriber(const std::string& client_id);
   std::vector<measure::StoredMeasurement> GetMeasurementsSnapshot() const;
+  std::vector<measure::StoredMeasurement> GetLatestMeasurementsSnapshot() const;
   std::vector<measure::StoredEvent> GetEventsSnapshot(
       size_t limit, int64_t since_unix_ms = 0, int64_t until_unix_ms = 0,
       const std::string& client_id = "") const;

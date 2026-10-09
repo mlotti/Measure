@@ -27,6 +27,10 @@ TEST_CASE("event store supports measurement history, filters, and trends") {
   CHECK(trends[1].bucket_start_unix_ms == 2000);
   CHECK(trends[1].average == 20.0);
   CHECK(trends[2].client_id == "sensor-2");
+  const auto latest = store.GetLatestMeasurements();
+  REQUIRE(latest.size() == 2);
+  CHECK(latest[0].client_id == "sensor-1");
+  CHECK(latest[0].point == 20);
 }
 
 TEST_CASE("event store persists events and restores the latest threshold") {
@@ -54,5 +58,7 @@ TEST_CASE("event store persists events and restores the latest threshold") {
 TEST_CASE("event store applies configured retention") {
   measure::EventStore store(":memory:", 1);
   store.RecordMeasurement({"expired", 1, 1});
+  store.RecordEvent("threshold", 1, "", "{}", std::nullopt, 6, "NORMAL");
   CHECK(store.GetEvents(10).empty());
+  CHECK(store.GetLatestThreshold(8) == 6);
 }

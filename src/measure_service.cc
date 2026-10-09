@@ -142,6 +142,11 @@ std::vector<StoredMeasurement> MeasureServiceImpl::GetMeasurementsSnapshot()
   return event_store_.GetMeasurements(max_measurements_);
 }
 
+std::vector<StoredMeasurement>
+MeasureServiceImpl::GetLatestMeasurementsSnapshot() const {
+  return event_store_.GetLatestMeasurements();
+}
+
 std::vector<measure::StoredEvent> MeasureServiceImpl::GetEventsSnapshot(
     size_t limit, int64_t since_unix_ms, int64_t until_unix_ms,
     const std::string& client_id) const {
@@ -214,7 +219,13 @@ grpc::ServerWriteReactor<Command>* MeasureServiceImpl::Subscribe(
 grpc::ServerUnaryReactor* MeasureServiceImpl::SetCalibrationMode(
     grpc::CallbackServerContext* context, const CalibrationRequest* request,
     CalibrationResponse* reply) {
-  StartCalibration(request->client_id(), request->duration_seconds());
+  try {
+    StartCalibration(request->client_id(), request->duration_seconds());
+  } catch (const std::exception& error) {
+    auto* reactor = context->DefaultReactor();
+    reactor->Finish(Status(grpc::StatusCode::INTERNAL, error.what()));
+    return reactor;
+  }
   reply->set_accepted(true);
   auto* reactor = context->DefaultReactor();
   reactor->Finish(Status::OK);
@@ -229,10 +240,11 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
   Command cal_cmd;
   cal_cmd.set_threshold(0);
   cal_cmd.set_mode(Mode::CALIBRATION);
+  const int duration = duration_seconds > 0 ? duration_seconds : 10;
   event_store_.RecordEvent(
       "command", CurrentTimeMillis(), client_id,
       "{\"action\":\"calibration_started\",\"duration_seconds\":" +
-          std::to_string(duration_seconds) + ",\"mode\":\"CALIBRATION\"}",
+          std::to_string(duration) + ",\"mode\":\"CALIBRATION\"}",
       std::nullopt, 0, "CALIBRATION");
 
   if (!client_id.empty()) {
@@ -246,7 +258,6 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
                     : " (client: " + client_id + ")")
             << " for " << duration_seconds << "s" << std::endl;
 
-  int duration = duration_seconds > 0 ? duration_seconds : 10;
   calibration_threads_.emplace_back([this, duration, client_id]() {
     std::unique_lock<std::mutex> lock(calibration_mu_);
     if (calibration_cv_.wait_for(lock, std::chrono::seconds(duration),
