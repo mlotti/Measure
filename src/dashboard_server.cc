@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -190,6 +191,27 @@ bool ParseInteger(const std::map<std::string, std::string>& form,
          parsed.ptr == it->second.data() + it->second.size();
 }
 
+bool ParseInteger64(const std::map<std::string, std::string>& form,
+                    const std::string& key, int64_t* value) {
+  const auto it = form.find(key);
+  if (it == form.end() || it->second.empty()) return false;
+  const auto parsed = std::from_chars(it->second.data(),
+                                      it->second.data() + it->second.size(),
+                                      *value);
+  return parsed.ec == std::errc() &&
+         parsed.ptr == it->second.data() + it->second.size();
+}
+
+bool ParseQuery(const std::string& path,
+               std::map<std::string, std::string>* query) {
+  const size_t query_start = path.find('?');
+  if (query_start == std::string::npos) {
+    query->clear();
+    return true;
+  }
+  return ParseForm(path.substr(query_start + 1), query);
+}
+
 bool HasAllowedOrigin(const std::string& headers, uint16_t port) {
   const std::string origin = GetHeaderValue(headers, "origin");
   const std::string port_text = ":" + std::to_string(port);
@@ -211,6 +233,103 @@ std::string BuildDashboardJson(const MeasureServiceImpl& service) {
   for (const auto& measurement : measurements) {
     client_ids.insert(measurement.client_id);
     latest[measurement.client_id] = measurement;
+  }
+
+  std::string BuildEventsJson(const std::vector<measure::StoredEvent>& events) {
+    std::string json = "{\"events\":[";
+    for (size_t i = 0; i < events.size(); ++i) {
+      if (i > 0) json += ",";
+      const auto& event = events[i];
+      json += "{\"id\":" + std::to_string(event.id) +
+              ",\"event_type\":\"" + measure::JsonEscape(event.event_type) +
+              "\",\"timestamp_unix_ms\":" +
+              std::to_string(event.timestamp_unix_ms) + ",\"client_id\":\"" +
+              measure::JsonEscape(event.client_id) + "\",\"point\":";
+      json += event.point.has_value() ? std::to_string(*event.point) : "null";
+      json += ",\"threshold\":";
+      json += event.threshold.has_value() ? std::to_string(*event.threshold) : "null";
+      json += ",\"mode\":\"" + measure::JsonEscape(event.mode) +
+              "\",\"payload\":" + event.payload_json + "}";
+    }
+    json += "]}";
+    return json;
+  }
+
+  std::string BuildTrendsJson(
+      const std::vector<measure::MeasurementTrend>& trends) {
+    std::string json = "{\"trends\":[";
+    for (size_t i = 0; i < trends.size(); ++i) {
+      if (i > 0) json += ",";
+      const auto& trend = trends[i];
+      json += "{\"client_id\":\"" + measure::JsonEscape(trend.client_id) +
+              "\",\"bucket_start_unix_ms\":" +
+              std::to_string(trend.bucket_start_unix_ms) +
+              ",\"count\":" + std::to_string(trend.count) +
+              ",\"average\":" + std::to_string(trend.average) +
+              ",\"minimum\":" + std::to_string(trend.minimum) +
+              ",\"maximum\":" + std::to_string(trend.maximum) + "}";
+    }
+    json += "]}";
+    return json;
+  }
+
+  bool ParseHistoryQuery(const std::string& request_path,
+                         std::map<std::string, std::string>* query,
+                         int64_t* since, int64_t* until, std::string* client,
+                         size_t* limit, size_t default_limit,
+                         size_t maximum_limit) {
+    if (!ParseQuery(request_path, query)) return false;
+    *since = 0;
+    *until = 0;
+    *client = "";
+    *limit = default_limit;
+    if (query->count("since_ms") && !ParseInteger64(*query, "since_ms", since)) {
+      return false;
+    }
+    if (query->count("until_ms") && !ParseInteger64(*query, "until_ms", until)) {
+      return false;
+    }
+    if (*since < 0 || *until < 0 || (*since > 0 && *until > 0 && *until < *since)) {
+      return false;
+    }
+    if (const auto it = query->find("client_id"); it != query->end()) {
+      *client = it->second;
+    }
+    if (query->count("limit")) {
+      int64_t parsed_limit = 0;
+      if (!ParseInteger64(*query, "limit", &parsed_limit) || parsed_limit < 1 ||
+          static_cast<uint64_t>(parsed_limit) > maximum_limit) {
+        return false;
+      }
+      *limit = static_cast<size_t>(parsed_limit);
+    }
+    return true;
+  }
+
+  std::string CsvField(const std::string& field) {
+    std::string escaped = "\"";
+    for (char character : field) {
+      if (character == '"') escaped += '"';
+      escaped += character;
+    }
+    escaped += '"';
+    return escaped;
+  }
+
+  std::string BuildEventsCsv(const std::vector<measure::StoredEvent>& events) {
+    std::string csv =
+        "id,event_type,timestamp_unix_ms,client_id,point,threshold,mode,payload\n";
+    for (const auto& event : events) {
+      csv += std::to_string(event.id) + "," + CsvField(event.event_type) + "," +
+             std::to_string(event.timestamp_unix_ms) + "," +
+             CsvField(event.client_id) + ",";
+      csv += event.point.has_value() ? std::to_string(*event.point) : "";
+      csv += ",";
+      csv += event.threshold.has_value() ? std::to_string(*event.threshold) : "";
+      csv += "," + CsvField(event.mode) + "," + CsvField(event.payload_json) +
+             "\r\n";
+    }
+    return csv;
   }
 
   std::string json =
@@ -386,7 +505,11 @@ void HandleHttpClient(int client_fd, MeasureServiceImpl& service,
     return;
   }
   if (request.method == "POST") {
-    HandlePost(client_fd, request, service, port);
+    try {
+      HandlePost(client_fd, request, service, port);
+    } catch (const std::exception& error) {
+      SendApiError(client_fd, "500 Internal Server Error", error.what());
+    }
     return;
   }
   if (request.method != "GET") {
@@ -396,17 +519,83 @@ void HandleHttpClient(int client_fd, MeasureServiceImpl& service,
   }
 
   const std::string path = request.path.substr(0, request.path.find('?'));
-  if (path == "/api/dashboard") {
-    SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
-                     BuildDashboardJson(service));
-  } else if (path == "/measurements.json") {
-    SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
-                     measure::BuildMeasurementsJson(
-                         service.GetMeasurementsSnapshot()));
-  } else if (path.rfind("/api/", 0) == 0) {
-    SendApiError(client_fd, "404 Not Found", "Not found.");
-  } else {
-    ServeStaticFile(client_fd, request.path, web_root);
+  try {
+    if (path == "/api/dashboard") {
+      SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
+                       BuildDashboardJson(service));
+    } else if (path == "/api/history") {
+      std::map<std::string, std::string> query;
+      int64_t since = 0;
+      int64_t until = 0;
+      std::string client_id;
+      size_t limit = 0;
+      if (!ParseHistoryQuery(request.path, &query, &since, &until, &client_id,
+                             &limit, 1000, 10000)) {
+        SendApiError(client_fd, "400 Bad Request",
+                     "Invalid history query; use valid since_ms, until_ms, "
+                     "client_id, and limit values.");
+      } else {
+        SendHttpResponse(
+            client_fd, "200 OK", "application/json; charset=utf-8",
+            BuildEventsJson(
+                service.GetEventsSnapshot(limit, since, until, client_id)));
+      }
+    } else if (path == "/api/trends") {
+      std::map<std::string, std::string> query;
+      int64_t since = 0;
+      int64_t until = 0;
+      std::string client_id;
+      size_t ignored_limit = 0;
+      int64_t bucket_ms = 3600000;
+      if (!ParseHistoryQuery(request.path, &query, &since, &until, &client_id,
+                             &ignored_limit, 10000, 10000) ||
+          (query.count("bucket_ms") &&
+           (!ParseInteger64(query, "bucket_ms", &bucket_ms) ||
+            bucket_ms < 1 || bucket_ms > 2678400000LL))) {
+        SendApiError(client_fd, "400 Bad Request",
+                     "Invalid trend query or bucket_ms value.");
+      } else {
+        SendHttpResponse(
+            client_fd, "200 OK", "application/json; charset=utf-8",
+            BuildTrendsJson(service.GetTrends(bucket_ms, since, until,
+                                              client_id)));
+      }
+    } else if (path == "/api/export") {
+      std::map<std::string, std::string> query;
+      int64_t since = 0;
+      int64_t until = 0;
+      std::string client_id;
+      size_t limit = static_cast<size_t>(
+          std::numeric_limits<int64_t>::max());
+      if (!ParseHistoryQuery(
+              request.path, &query, &since, &until, &client_id, &limit,
+              limit, limit)) {
+        SendApiError(client_fd, "400 Bad Request", "Invalid export query.");
+      } else if (query["format"] == "csv") {
+        SendHttpResponse(
+            client_fd, "200 OK", "text/csv; charset=utf-8",
+            BuildEventsCsv(
+                service.GetEventsSnapshot(limit, since, until, client_id)));
+      } else if (query["format"].empty() || query["format"] == "json") {
+        SendHttpResponse(
+            client_fd, "200 OK", "application/json; charset=utf-8",
+            BuildEventsJson(
+                service.GetEventsSnapshot(limit, since, until, client_id)));
+      } else {
+        SendApiError(client_fd, "400 Bad Request",
+                     "Export format must be json or csv.");
+      }
+    } else if (path == "/measurements.json") {
+      SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
+                       measure::BuildMeasurementsJson(
+                           service.GetMeasurementsSnapshot()));
+    } else if (path.rfind("/api/", 0) == 0) {
+      SendApiError(client_fd, "404 Not Found", "Not found.");
+    } else {
+      ServeStaticFile(client_fd, request.path, web_root);
+    }
+  } catch (const std::exception& error) {
+    SendApiError(client_fd, "500 Internal Server Error", error.what());
   }
 }
 

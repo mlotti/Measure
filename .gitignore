@@ -22,6 +22,9 @@ measure_server
 
 # Output files
 result.txt
+measure.db
+measure.db-shm
+measure.db-wal
 
 # CodeQL generated files
 _codeql_detected_source_root

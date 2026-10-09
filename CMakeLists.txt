@@ -4,6 +4,12 @@ project(Measure C CXX)
 
 include(./common.cmake)
 
+find_path(SQLITE3_INCLUDE_DIR sqlite3.h)
+find_library(SQLITE3_LIBRARY NAMES sqlite3)
+if(NOT SQLITE3_INCLUDE_DIR OR NOT SQLITE3_LIBRARY)
+  message(FATAL_ERROR "SQLite3 development files are required")
+endif()
+
 # Proto file
 get_filename_component(m_proto "./measure.proto" ABSOLUTE)
 get_filename_component(m_proto_path "${m_proto}" PATH)
@@ -42,10 +48,12 @@ add_library(measurement_utils src/measurement_utils.cc)
 target_compile_features(measurement_utils PUBLIC cxx_std_17)
 target_include_directories(measurement_utils PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-add_library(measure_service src/measure_service.cc)
+add_library(measure_service src/measure_service.cc src/event_store.cc)
 target_compile_features(measure_service PUBLIC cxx_std_17)
-target_include_directories(measure_service PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(measure_service m_grpc_proto)
+target_include_directories(measure_service
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+  PRIVATE "${SQLITE3_INCLUDE_DIR}")
+target_link_libraries(measure_service m_grpc_proto "${SQLITE3_LIBRARY}")
 
 # Targets measure_[async_](client|server)
 foreach(_target

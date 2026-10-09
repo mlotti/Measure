@@ -3,7 +3,6 @@
 
 #include <cstddef>
 #include <condition_variable>
-#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -12,18 +11,27 @@
 
 #include <grpcpp/grpcpp.h>
 #include "measure.grpc.pb.h"
+#include "event_store.h"
 #include "measurement_utils.h"
 
 class SubscribeReactor;
 
 class MeasureServiceImpl final : public measure::Measure::CallbackService {
  public:
-  explicit MeasureServiceImpl(size_t max_measurements);
+  explicit MeasureServiceImpl(size_t max_measurements,
+                              const std::string& database_path = ":memory:",
+                              int retention_days = 0);
   ~MeasureServiceImpl();
 
   void AddSubscriber(const std::string& client_id, SubscribeReactor* reactor);
   void RemoveSubscriber(const std::string& client_id);
   std::vector<measure::StoredMeasurement> GetMeasurementsSnapshot() const;
+  std::vector<measure::StoredEvent> GetEventsSnapshot(
+      size_t limit, int64_t since_unix_ms = 0, int64_t until_unix_ms = 0,
+      const std::string& client_id = "") const;
+  std::vector<measure::MeasurementTrend> GetTrends(
+      int64_t bucket_ms, int64_t since_unix_ms = 0,
+      int64_t until_unix_ms = 0, const std::string& client_id = "") const;
   std::vector<std::string> GetConnectedClients() const;
   int GetThreshold() const;
   void SetThreshold(int threshold);
@@ -47,10 +55,9 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
 
   mutable std::mutex subscribers_mu_;
   std::map<std::string, SubscribeReactor*> subscribers_;
-  int current_threshold_ = 8;
+  measure::EventStore event_store_;
   size_t max_measurements_;
-  mutable std::mutex measurements_mu_;
-  std::deque<measure::StoredMeasurement> measurements_;
+  int current_threshold_ = 8;
   std::mutex calibration_mu_;
   std::condition_variable calibration_cv_;
   bool shutting_down_ = false;

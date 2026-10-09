@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,12 +11,6 @@
 struct sqlite3;
 
 namespace measure {
-
-struct StoredMeasurement {
-  std::string client_id;
-  int point;
-  int64_t timestamp_unix_ms;
-};
 
 struct StoredEvent {
   int64_t id;

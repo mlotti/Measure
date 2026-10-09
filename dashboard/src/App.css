@@ -127,6 +127,46 @@
   padding: 8px 16px 15px;
 }
 
+.history-tools {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 4px 16px 12px;
+}
+
+.history-tools label {
+  display: grid;
+  gap: 4px;
+  color: #666;
+  font-size: 13px;
+}
+
+.history-tools select {
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid #c6c9cc;
+  border-radius: 3px;
+  color: #25272a;
+  background: #fff;
+  font: inherit;
+}
+
+.history-tools a {
+  padding: 8px 10px;
+  color: #0788ed;
+  font-weight: 600;
+}
+
+.trend-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 0 30px 8px;
+  color: #565b60;
+  font-size: 13px;
+}
+
 .config-table > div {
   min-height: 44px;
   display: flex;

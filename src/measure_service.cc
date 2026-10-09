@@ -1,7 +1,7 @@
 #include "measure_service.h"
 
 #include <chrono>
-#include <fstream>
+#include <exception>
 #include <iostream>
 #include <queue>
 #include <thread>
@@ -23,15 +23,6 @@ int64_t CurrentTimeMillis() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
-}
-
-void WriteMeasurement(const StoredMeasurement& measurement) {
-  std::ofstream myfile("result.txt", std::ios::app);
-  if (myfile.is_open()) {
-    myfile << measurement.timestamp_unix_ms << " " << measurement.client_id
-           << " " << measurement.point << std::endl;
-    myfile.close();
-  }
 }
 
 }
@@ -115,8 +106,12 @@ class SubscribeReactor : public grpc::ServerWriteReactor<Command> {
   bool done_ = false;
 };
 
-MeasureServiceImpl::MeasureServiceImpl(size_t max_measurements)
-    : max_measurements_(max_measurements) {}
+MeasureServiceImpl::MeasureServiceImpl(size_t max_measurements,
+                                       const std::string& database_path,
+                                       int retention_days)
+    : event_store_(database_path, retention_days),
+      max_measurements_(max_measurements),
+      current_threshold_(event_store_.GetLatestThreshold(8)) {}
 
 MeasureServiceImpl::~MeasureServiceImpl() {
   {
@@ -144,9 +139,20 @@ void MeasureServiceImpl::RemoveSubscriber(const std::string& client_id) {
 
 std::vector<StoredMeasurement> MeasureServiceImpl::GetMeasurementsSnapshot()
     const {
-  std::lock_guard<std::mutex> lock(measurements_mu_);
-  return std::vector<StoredMeasurement>(measurements_.begin(),
-                                        measurements_.end());
+  return event_store_.GetMeasurements(max_measurements_);
+}
+
+std::vector<measure::StoredEvent> MeasureServiceImpl::GetEventsSnapshot(
+    size_t limit, int64_t since_unix_ms, int64_t until_unix_ms,
+    const std::string& client_id) const {
+  return event_store_.GetEvents(limit, since_unix_ms, until_unix_ms, client_id);
+}
+
+std::vector<measure::MeasurementTrend> MeasureServiceImpl::GetTrends(
+    int64_t bucket_ms, int64_t since_unix_ms, int64_t until_unix_ms,
+    const std::string& client_id) const {
+  return event_store_.GetTrends(bucket_ms, since_unix_ms, until_unix_ms,
+                                client_id);
 }
 
 std::vector<std::string> MeasureServiceImpl::GetConnectedClients() const {
@@ -166,6 +172,9 @@ int MeasureServiceImpl::GetThreshold() const {
 
 void MeasureServiceImpl::SetThreshold(int threshold) {
   std::lock_guard<std::mutex> lock(subscribers_mu_);
+  event_store_.RecordEvent("threshold", CurrentTimeMillis(), "",
+                           "{\"mode\":\"NORMAL\"}", std::nullopt, threshold,
+                           "NORMAL");
   current_threshold_ = threshold;
   Command cmd;
   cmd.set_threshold(threshold);
@@ -184,14 +193,13 @@ grpc::ServerUnaryReactor* MeasureServiceImpl::RecordMeasurement(
       request->point(),
       request->timestamp_unix_ms() > 0 ? request->timestamp_unix_ms()
                                        : CurrentTimeMillis()};
-  {
-    std::lock_guard<std::mutex> lock(measurements_mu_);
-    measurements_.push_back(measurement);
-    while (measurements_.size() > max_measurements_) {
-      measurements_.pop_front();
-    }
+  try {
+    event_store_.RecordMeasurement(measurement);
+  } catch (const std::exception& error) {
+    auto* reactor = context->DefaultReactor();
+    reactor->Finish(Status(grpc::StatusCode::INTERNAL, error.what()));
+    return reactor;
   }
-  WriteMeasurement(measurement);
   reply->set_response(0);
   auto* reactor = context->DefaultReactor();
   reactor->Finish(Status::OK);
@@ -221,6 +229,11 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
   Command cal_cmd;
   cal_cmd.set_threshold(0);
   cal_cmd.set_mode(Mode::CALIBRATION);
+  event_store_.RecordEvent(
+      "command", CurrentTimeMillis(), client_id,
+      "{\"action\":\"calibration_started\",\"duration_seconds\":" +
+          std::to_string(duration_seconds) + ",\"mode\":\"CALIBRATION\"}",
+      std::nullopt, 0, "CALIBRATION");
 
   if (!client_id.empty()) {
     SendCommandToClient(client_id, cal_cmd);
@@ -244,6 +257,15 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
     Command normal_cmd;
     normal_cmd.set_threshold(GetThreshold());
     normal_cmd.set_mode(Mode::NORMAL);
+    try {
+      event_store_.RecordEvent(
+          "command", CurrentTimeMillis(), client_id,
+          "{\"action\":\"calibration_ended\",\"mode\":\"NORMAL\"}",
+          std::nullopt, normal_cmd.threshold(), "NORMAL");
+    } catch (const std::exception& error) {
+      std::cerr << "Failed to store calibration command: " << error.what()
+                << std::endl;
+    }
     if (client_id.empty()) {
       BroadcastCommand(normal_cmd);
     } else {

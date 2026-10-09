@@ -10,9 +10,9 @@
 ## Overview
 
 Clients generate measurements and, in the current sample client, send values
-above the active threshold to the server. The server stores every received
-measurement in a bounded in-memory history, appends it to `result.txt`, and
-serves an operator dashboard on localhost.
+above the active threshold to the server. The server stores each received
+measurement and operator command in a SQLite event database for the localhost
+dashboard.
 
 ## Architecture
 
@@ -23,13 +23,14 @@ flowchart LR
   C3[Client: client3]
   S[gRPC Server<br/>measure_server]
   G[Local fleet dashboard<br/>http://127.0.0.1:8080]
-  F[result.txt]
+  D[(SQLite event database)]
 
   C1 -->|RecordMeasurement / Subscribe| S
   C2 -->|RecordMeasurement / Subscribe| S
   C3 -->|RecordMeasurement / Subscribe| S
   S -->|fleet status, controls, and history| G
-  S -->|append timestamp client_id point| F
+  S -->|append measurement and command events| D
+  G -->|historical queries and exports| D
 ```
 
 ## Build
@@ -90,6 +91,12 @@ Start the server:
 ./build/measure_server --port=50051 --http_port=8080 --samples_retained=500
 ```
 
+The server stores events in `measure.db` by default. Configure its location with
+`--database_path=/path/to/measure.db`. Retention is unlimited by default; set
+`--retention_days=365` to remove older events at startup and as new events are
+recorded. `--samples_retained` controls only the recent dashboard device view,
+not the database history.
+
 The server serves the built React app from `dashboard/dist`. Use
 `--web_root=/path/to/dashboard/dist` to select another frontend build directory.
 
@@ -121,9 +128,18 @@ The dashboard data is available from:
 
 ```text
 GET  http://127.0.0.1:8080/api/dashboard
+GET  http://127.0.0.1:8080/api/history?since_ms=...&until_ms=...&limit=...
+GET  http://127.0.0.1:8080/api/trends?bucket_ms=3600000
+GET  http://127.0.0.1:8080/api/export?format=csv
+GET  http://127.0.0.1:8080/api/export?format=json
 POST http://127.0.0.1:8080/api/threshold
 POST http://127.0.0.1:8080/api/calibration
 ```
+
+History queries accept optional `since_ms`, `until_ms`, `client_id`, and
+`limit` parameters. Trend queries return per-device count, average, minimum,
+and maximum measurement values grouped into time buckets. Exports accept the
+same time and client filters and include both measurement and command events.
 
 Threshold and calibration requests use URL-encoded form fields. For example,
 from the dashboard origin:
@@ -140,9 +156,12 @@ client_id=client1&duration_seconds=10
   - `point`
   - `client_id`
   - `timestamp_unix_ms`
-- The server keeps a bounded in-memory history for the dashboard and event list.
-- The server also appends measurements to `result.txt` as:
-  - `timestamp client_id point`
+- Measurements, threshold changes, and calibration commands are stored as
+  append-only events in SQLite. Event rows include a type, timestamp, optional
+  measurement/command fields, and a JSON payload for forward-compatible event
+  data.
+- The dashboard history, charts, and device readings are loaded from the
+  database. Connected status and the currently connected clients are transient.
 - Clients subscribe to threshold updates from the server using gRPC streaming.
 - The threshold is shared by all clients; calibration can target one connected
   client or all clients.
