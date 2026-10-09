@@ -14,6 +14,26 @@ type Event = {
   timestamp_unix_ms: number
 }
 
+type HistoryEvent = {
+  id: number
+  event_type: string
+  client_id: string
+  point: number | null
+  threshold: number | null
+  mode: string
+  timestamp_unix_ms: number
+  payload: { action?: string }
+}
+
+type Trend = {
+  client_id: string
+  bucket_start_unix_ms: number
+  count: number
+  average: number
+  minimum: number
+  maximum: number
+}
+
 type DashboardData = {
   threshold: number
   devices: Device[]
@@ -52,6 +72,16 @@ function readLayout(): Layout {
 
 function timeLabel(timestamp: number) {
   return timestamp ? new Date(timestamp).toLocaleString() : '—'
+}
+
+function rangeStart(range: string) {
+  if (range === 'all') return 0
+  const durations: Record<string, number> = {
+    '1h': 60 * 60 * 1000,
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+  }
+  return Date.now() - durations[range]
 }
 
 function Panel({ id, title, children, onDragStart, onDrop }: {
@@ -140,6 +170,9 @@ function Chart({ events }: { events: Event[] }) {
 
 function App() {
   const [data, setData] = useState<DashboardData>({ threshold: 8, devices: [], events: [] })
+  const [history, setHistory] = useState<HistoryEvent[]>([])
+  const [trends, setTrends] = useState<Trend[]>([])
+  const [historyRange, setHistoryRange] = useState('24h')
   const [layout, setLayout] = useState<Layout>(readLayout)
   const [notice, setNotice] = useState('')
   const [threshold, setThreshold] = useState('8')
@@ -150,15 +183,30 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const response = await fetch('/api/dashboard', { cache: 'no-store' })
+      const since = rangeStart(historyRange)
+      const query = `since_ms=${since}&limit=1000`
+      const bucket = historyRange === '1h' ? 60000
+        : historyRange === '7d' ? 3600000
+          : historyRange === 'all' ? 86400000 : 900000
+      const [response, historyResponse, trendsResponse] = await Promise.all([
+        fetch('/api/dashboard', { cache: 'no-store' }),
+        fetch(`/api/history?${query}`, { cache: 'no-store' }),
+        fetch(`/api/trends?since_ms=${since}&bucket_ms=${bucket}`, { cache: 'no-store' }),
+      ])
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      if (!historyResponse.ok) throw new Error(`History HTTP ${historyResponse.status}`)
+      if (!trendsResponse.ok) throw new Error(`Trends HTTP ${trendsResponse.status}`)
       const current = await response.json() as DashboardData
+      const currentHistory = await historyResponse.json() as { events: HistoryEvent[] }
+      const currentTrends = await trendsResponse.json() as { trends: Trend[] }
       setData(current)
+      setHistory(currentHistory.events)
+      setTrends(currentTrends.trends)
       setThreshold(value => value === String(data.threshold) ? String(current.threshold) : value)
     } catch (error) {
       setNotice(`Dashboard refresh failed: ${String(error)}`)
     }
-  }, [data.threshold])
+  }, [data.threshold, historyRange])
 
   useEffect(() => {
     const initial = window.setTimeout(() => void refresh(), 0)
@@ -214,6 +262,15 @@ function App() {
   }
 
   const connected = data.devices.filter(device => device.connected).length
+  const chartEvents = history
+    .filter(item => item.event_type === 'measurement' && item.point !== null)
+    .map(item => ({
+      client_id: item.client_id,
+      point: item.point as number,
+      timestamp_unix_ms: item.timestamp_unix_ms,
+    }))
+  const since = rangeStart(historyRange)
+  const exportQuery = since ? `?since_ms=${since}` : ''
   const renderPanel = (id: string) => {
     const dragProps = { onDragStart: setDragged, onDrop: movePanel }
     switch (id) {
@@ -277,21 +334,45 @@ function App() {
       case 'chart':
         return (
           <Panel key={id} id={id} title="Fleet Measurement Chart" {...dragProps}>
-            <div className="chart-content"><Chart events={data.events} /></div>
+            <div className="chart-content">
+              <Chart events={chartEvents} />
+              {!!trends.length && <div className="trend-summary">
+                <strong>Trend averages:</strong> {trends.slice(-6).map((trend, index) => (
+                  <span key={`${trend.client_id}-${trend.bucket_start_unix_ms}-${index}`}>
+                    {trend.client_id}: {trend.average.toFixed(1)} ({trend.count})
+                  </span>
+                ))}
+              </div>}
+            </div>
           </Panel>
         )
       case 'history':
         return (
           <Panel key={id} id={id} title="Measurement Event History" {...dragProps}>
+            <div className="history-tools">
+              <label>History range
+                <select value={historyRange} onChange={event => setHistoryRange(event.target.value)}>
+                  <option value="1h">Last hour</option>
+                  <option value="24h">Last 24 hours</option>
+                  <option value="7d">Last 7 days</option>
+                  <option value="all">All history (latest 1,000 events)</option>
+                </select>
+              </label>
+              <a href={`/api/export?format=csv${exportQuery}`} download="measure-events.csv">Export CSV</a>
+              <a href={`/api/export?format=json${exportQuery}`} download="measure-events.json">Export JSON</a>
+            </div>
             <div className="table-scroll history">
-              <table><thead><tr><th>Time</th><th>Device</th><th>Measurement</th></tr></thead>
-                <tbody>{data.events.slice().reverse().slice(0, 100).map((item, index) => (
-                  <tr key={`${item.timestamp_unix_ms}-${item.client_id}-${index}`}>
-                    <td>{timeLabel(item.timestamp_unix_ms)}</td><td>{item.client_id}</td><td>{item.point}</td>
+              <table><thead><tr><th>Time</th><th>Event</th><th>Device</th><th>Value</th></tr></thead>
+                <tbody>{history.slice().reverse().slice(0, 100).map(item => (
+                  <tr key={item.id}>
+                    <td>{timeLabel(item.timestamp_unix_ms)}</td>
+                    <td>{item.event_type === 'measurement' ? 'Measurement' : item.payload.action || item.event_type}</td>
+                    <td>{item.client_id || 'All devices'}</td>
+                    <td>{item.point ?? (item.threshold !== null ? `Threshold ${item.threshold}` : item.mode || '—')}</td>
                   </tr>
                 ))}</tbody>
               </table>
-              {!data.events.length && <div className="empty">No measurement events yet.</div>}
+              {!history.length && <div className="empty">No events in this time range.</div>}
             </div>
           </Panel>
         )

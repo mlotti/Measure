@@ -14,3 +14,11 @@ target_link_libraries(measure_service_tests
     m_grpc_proto)
 
 add_test(NAME measure_service_tests COMMAND measure_service_tests)
+
+add_executable(event_store_tests event_store_tests.cc)
+target_link_libraries(event_store_tests
+  PRIVATE
+    Catch2::Catch2WithMain
+    measure_service)
+
+add_test(NAME event_store_tests COMMAND event_store_tests)

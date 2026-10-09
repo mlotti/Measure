@@ -5,13 +5,9 @@
 #include <string>
 #include <vector>
 
-namespace measure {
+#include "event_store.h"
 
-struct StoredMeasurement {
-  std::string client_id;
-  int point;
-  int64_t timestamp_unix_ms;
-};
+namespace measure {
 
 std::string JsonEscape(const std::string& value);
 std::string BuildMeasurementsJson(
