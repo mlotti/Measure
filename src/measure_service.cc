@@ -1,4 +1,5 @@
 #include "measure_service.h"
+#include "device_identity.h"
 
 #include <chrono>
 #include <exception>
@@ -6,6 +7,8 @@
 #include <queue>
 #include <thread>
 #include <utility>
+
+#include "measurement_utils.h"
 
 using grpc::Status;
 using measure::CalibrationRequest;
@@ -23,6 +26,14 @@ int64_t CurrentTimeMillis() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
+}
+
+std::string PeerIdentity(const grpc::ServerContextBase& context) {
+  const auto auth_context = context.auth_context();
+  if (!auth_context) return "";
+  const auto common_names = auth_context->FindPropertyValues("x509_common_name");
+  if (common_names.size() != 1) return "";
+  return std::string(common_names.front().data(), common_names.front().size());
 }
 
 }
@@ -106,6 +117,13 @@ class SubscribeReactor : public grpc::ServerWriteReactor<Command> {
   bool done_ = false;
 };
 
+class RejectedSubscribeReactor : public grpc::ServerWriteReactor<Command> {
+ public:
+  explicit RejectedSubscribeReactor(const Status& status) { Finish(status); }
+
+  void OnDone() override { delete this; }
+};
+
 MeasureServiceImpl::MeasureServiceImpl(size_t max_measurements,
                                        const std::string& database_path,
                                        int retention_days)
@@ -175,11 +193,13 @@ int MeasureServiceImpl::GetThreshold() const {
   return current_threshold_;
 }
 
-void MeasureServiceImpl::SetThreshold(int threshold) {
+void MeasureServiceImpl::SetThreshold(int threshold,
+                                      const std::string& actor_identity) {
   std::lock_guard<std::mutex> lock(subscribers_mu_);
   event_store_.RecordEvent("threshold", CurrentTimeMillis(), "",
-                           "{\"mode\":\"NORMAL\"}", std::nullopt, threshold,
-                           "NORMAL");
+                           "{\"mode\":\"NORMAL\",\"actor\":\"" +
+                               measure::JsonEscape(actor_identity) + "\"}",
+                           std::nullopt, threshold, "NORMAL");
   current_threshold_ = threshold;
   Command cmd;
   cmd.set_threshold(threshold);
@@ -192,9 +212,16 @@ void MeasureServiceImpl::SetThreshold(int threshold) {
 grpc::ServerUnaryReactor* MeasureServiceImpl::RecordMeasurement(
     grpc::CallbackServerContext* context, const Measurement* request,
     Thumbs* reply) {
+  if (!measure::IsDeviceIdentityForClient(PeerIdentity(*context),
+                                          request->client_id())) {
+    auto* reactor = context->DefaultReactor();
+    reactor->Finish(Status(grpc::StatusCode::UNAUTHENTICATED,
+                           "Device certificate does not match client_id."));
+    return reactor;
+  }
   std::this_thread::sleep_for(std::chrono::milliseconds(5000));
   StoredMeasurement measurement{
-      request->client_id().empty() ? "unknown" : request->client_id(),
+      request->client_id(),
       request->point(),
       request->timestamp_unix_ms() > 0 ? request->timestamp_unix_ms()
                                        : CurrentTimeMillis()};
@@ -213,14 +240,28 @@ grpc::ServerUnaryReactor* MeasureServiceImpl::RecordMeasurement(
 
 grpc::ServerWriteReactor<Command>* MeasureServiceImpl::Subscribe(
     grpc::CallbackServerContext* context, const ClientInfo* request) {
+  if (!measure::IsDeviceIdentityForClient(PeerIdentity(*context),
+                                          request->client_id())) {
+    return new RejectedSubscribeReactor(
+        Status(grpc::StatusCode::UNAUTHENTICATED,
+               "Device certificate does not match client_id."));
+  }
   return new SubscribeReactor(request->client_id(), GetThreshold(), this);
 }
 
 grpc::ServerUnaryReactor* MeasureServiceImpl::SetCalibrationMode(
     grpc::CallbackServerContext* context, const CalibrationRequest* request,
     CalibrationResponse* reply) {
+  const std::string actor_identity = PeerIdentity(*context);
+  if (!measure::IsOperatorIdentity(actor_identity)) {
+    auto* reactor = context->DefaultReactor();
+    reactor->Finish(Status(grpc::StatusCode::PERMISSION_DENIED,
+                           "An operator certificate is required."));
+    return reactor;
+  }
   try {
-    StartCalibration(request->client_id(), request->duration_seconds());
+    StartCalibration(request->client_id(), request->duration_seconds(),
+                     actor_identity);
   } catch (const std::exception& error) {
     auto* reactor = context->DefaultReactor();
     reactor->Finish(Status(grpc::StatusCode::INTERNAL, error.what()));
@@ -233,7 +274,8 @@ grpc::ServerUnaryReactor* MeasureServiceImpl::SetCalibrationMode(
 }
 
 void MeasureServiceImpl::StartCalibration(const std::string& client_id,
-                                          int duration_seconds) {
+                                          int duration_seconds,
+                                          const std::string& actor_identity) {
   std::lock_guard<std::mutex> lock(calibration_mu_);
   if (shutting_down_) return;
 
@@ -244,7 +286,8 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
   event_store_.RecordEvent(
       "command", CurrentTimeMillis(), client_id,
       "{\"action\":\"calibration_started\",\"duration_seconds\":" +
-          std::to_string(duration) + ",\"mode\":\"CALIBRATION\"}",
+          std::to_string(duration) + ",\"mode\":\"CALIBRATION\",\"actor\":\"" +
+          measure::JsonEscape(actor_identity) + "\"}",
       std::nullopt, 0, "CALIBRATION");
 
   if (!client_id.empty()) {
@@ -258,7 +301,8 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
                     : " (client: " + client_id + ")")
             << " for " << duration_seconds << "s" << std::endl;
 
-  calibration_threads_.emplace_back([this, duration, client_id]() {
+  calibration_threads_.emplace_back(
+      [this, duration, client_id, actor_identity]() {
     std::unique_lock<std::mutex> lock(calibration_mu_);
     if (calibration_cv_.wait_for(lock, std::chrono::seconds(duration),
                                  [this]() { return shutting_down_; })) {
@@ -271,7 +315,8 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
     try {
       event_store_.RecordEvent(
           "command", CurrentTimeMillis(), client_id,
-          "{\"action\":\"calibration_ended\",\"mode\":\"NORMAL\"}",
+          "{\"action\":\"calibration_ended\",\"mode\":\"NORMAL\",\"actor\":\"" +
+              measure::JsonEscape(actor_identity) + "\"}",
           std::nullopt, normal_cmd.threshold(), "NORMAL");
     } catch (const std::exception& error) {
       std::cerr << "Failed to store calibration command: " << error.what()
@@ -284,7 +329,7 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
     }
     std::cout << "Calibration ended, threshold restored to "
               << normal_cmd.threshold() << std::endl;
-  });
+      });
 }
 
 void MeasureServiceImpl::BroadcastCommand(const Command& cmd) {

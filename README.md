@@ -90,7 +90,10 @@ ctest --test-dir build --output-on-failure
 
 Start the server:
 ```bash
-./build/measure_server --port=50051 --http_port=8080 --samples_retained=500
+./build/measure_server --port=50051 --http_port=8080 --samples_retained=500 \
+  --server_cert=/etc/measure/server.crt \
+  --server_key=/etc/measure/server.key \
+  --client_ca=/etc/measure/device-and-operator-ca.crt
 ```
 
 The server stores events in `measure.db` by default. Configure its location with
@@ -104,8 +107,14 @@ The server serves the built React app from `dashboard/dist`. Use
 
 Start one or more clients with different IDs:
 ```bash
-./build/measure_client --target=localhost:50051 --client_id=client1
-./build/measure_client --target=localhost:50051 --client_id=client2
+./build/measure_client --target=localhost:50051 --client_id=client1 \
+  --root_cert=/etc/measure/server-ca.crt \
+  --client_cert=/etc/measure/client1.crt \
+  --client_key=/etc/measure/client1.key
+./build/measure_client --target=localhost:50051 --client_id=client2 \
+  --root_cert=/etc/measure/server-ca.crt \
+  --client_cert=/etc/measure/client2.crt \
+  --client_key=/etc/measure/client2.key
 ```
 
 Open the fleet dashboard:
@@ -125,6 +134,42 @@ The dashboard provides:
 
 The dashboard and its control endpoints are bound to localhost only. Mutating
 requests require a same-origin request from the dashboard.
+
+## Authentication and authorization
+
+The gRPC listener requires mutual TLS. Configure the server certificate and
+private key, and a CA certificate trusted to issue client certificates. Clients
+also require the CA that issued the server certificate and their own certificate
+and private key. Missing credentials, untrusted certificates, and insecure gRPC
+connections are rejected.
+
+The trusted client CA is the identity authority. It must issue certificates with
+one of these common names:
+
+- `device:<client_id>` for a device. `RecordMeasurement` and `Subscribe` require
+  the certificate identity to match the RPC's `client_id`.
+- `operator:<name>` for an operator. `SetCalibrationMode` requires an operator
+  certificate. For example, run the client in calibration mode with the
+  operator's certificate and key:
+
+  ```bash
+  ./build/measure_client --target=localhost:50051 --calibrate=true \
+    --root_cert=/etc/measure/server-ca.crt \
+    --client_cert=/etc/measure/operator.crt \
+    --client_key=/etc/measure/operator.key
+  ```
+
+Protect private keys and issue device and operator certificates only through
+your trusted PKI. The dashboard remains bound to `127.0.0.1`; its same-origin
+check is not user authentication, so do not expose its HTTP port to a network.
+Calibration events record the authenticated operator certificate identity.
+Dashboard-originated actions are identified as `localhost_dashboard`.
+
+This establishes authenticated device identity and basic operator authorization.
+The current command stream is still transient: command IDs, device acknowledgments,
+durable pending commands, retry/reconnect guarantees, and per-device outcomes
+remain follow-up work. Tenant and device-group modeling and bulk targeting are
+also outside this slice and belong to issue #10.
 
 The dashboard data is available from:
 
@@ -161,7 +206,8 @@ client_id=client1&duration_seconds=10
 - Measurements, threshold changes, and calibration commands are stored as
   append-only events in SQLite. Event rows include a type, timestamp, optional
   measurement/command fields, and a JSON payload for forward-compatible event
-  data.
+  data. Calibration lifecycle events also record the authenticated operator
+  identity when invoked over gRPC.
 - The dashboard history, charts, and device readings are loaded from the
   database. Connected status and the currently connected clients are transient.
 - Clients subscribe to threshold updates from the server using gRPC streaming.

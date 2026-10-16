@@ -1,6 +1,9 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 #include <random>
 #include <atomic>
 #include <thread>
@@ -25,6 +28,9 @@ ABSL_FLAG(std::string, client_id, "client1", "Unique client identifier");
 ABSL_FLAG(bool, calibrate, false,
           "Operator mode: send a SetCalibrationMode command to the server");
 ABSL_FLAG(int, duration, 10, "Calibration duration in seconds (operator mode)");
+ABSL_FLAG(std::string, root_cert, "", "PEM CA certificate for the server");
+ABSL_FLAG(std::string, client_cert, "", "PEM device or operator certificate");
+ABSL_FLAG(std::string, client_key, "", "PEM device or operator private key");
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -37,6 +43,18 @@ using measure::Measure;
 using measure::Measurement;
 using measure::Mode;
 using measure::Thumbs;
+
+std::string ReadFile(const std::string& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("Unable to read credential file: " + path);
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const std::string result = contents.str();
+  if (result.empty()) {
+    throw std::runtime_error("Credential file is empty: " + path);
+  }
+  return result;
+}
 
 class MeasureClient {
  public:
@@ -149,8 +167,12 @@ int main(int argc, char** argv) {
   std::string target_str = absl::GetFlag(FLAGS_target);
   std::string client_id = absl::GetFlag(FLAGS_client_id);
 
+  grpc::SslCredentialsOptions tls_options;
+  tls_options.pem_root_certs = ReadFile(absl::GetFlag(FLAGS_root_cert));
+  tls_options.pem_cert_chain = ReadFile(absl::GetFlag(FLAGS_client_cert));
+  tls_options.pem_private_key = ReadFile(absl::GetFlag(FLAGS_client_key));
   MeasureClient measure(
-      grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials()),
+      grpc::CreateChannel(target_str, grpc::SslCredentials(tls_options)),
       client_id);
 
   // Operator mode: send calibration command and exit.

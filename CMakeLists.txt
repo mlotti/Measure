@@ -53,7 +53,10 @@ target_compile_features(measure_service PUBLIC cxx_std_17)
 target_include_directories(measure_service
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
   PRIVATE "${SQLITE3_INCLUDE_DIR}")
-target_link_libraries(measure_service m_grpc_proto "${SQLITE3_LIBRARY}")
+target_link_libraries(measure_service
+  m_grpc_proto
+  measurement_utils
+  "${SQLITE3_LIBRARY}")
 
 # Targets measure_[async_](client|server)
 foreach(_target
