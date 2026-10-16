@@ -85,6 +85,10 @@ TEST_CASE("gRPC subscribers receive threshold and calibration commands") {
   request.set_client_id("sensor-1");
   request.set_duration_seconds(1);
   measure::CalibrationResponse response;
+  grpc::ClientContext unauthorized_context;
+  CHECK(stub->SetCalibrationMode(&unauthorized_context, request, &response)
+            .error_code() == grpc::StatusCode::PERMISSION_DENIED);
+
   grpc::ClientContext calibration_context;
   auto operator_stub =
       measure::Measure::NewStub(TestChannel(port, true));
@@ -95,7 +99,7 @@ TEST_CASE("gRPC subscribers receive threshold and calibration commands") {
   REQUIRE(reader->Read(&command));
   CHECK(command.threshold() == 0);
   CHECK(command.mode() == measure::Mode::CALIBRATION);
-  const auto command_events = service.GetEventsSnapshot(10);
+  const auto command_events = service.GetEventsSnapshot(10, 0, 0, "sensor-1");
   REQUIRE(command_events.size() >= 2);
   CHECK(command_events.front().payload_json.find("operator:tester") !=
         std::string::npos);
