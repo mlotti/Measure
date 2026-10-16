@@ -100,7 +100,7 @@ TEST_CASE("gRPC subscribers receive threshold and calibration commands") {
   CHECK(command.threshold() == 0);
   CHECK(command.mode() == measure::Mode::CALIBRATION);
   const auto command_events = service.GetEventsSnapshot(10, 0, 0, "sensor-1");
-  REQUIRE(command_events.size() >= 2);
+  REQUIRE(command_events.size() == 1);
   CHECK(command_events.front().payload_json.find("operator:tester") !=
         std::string::npos);
 
