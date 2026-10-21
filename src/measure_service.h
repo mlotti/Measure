@@ -34,8 +34,11 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
       int64_t until_unix_ms = 0, const std::string& client_id = "") const;
   std::vector<std::string> GetConnectedClients() const;
   int GetThreshold() const;
-  void SetThreshold(int threshold);
-  void StartCalibration(const std::string& client_id, int duration_seconds);
+  void SetThreshold(int threshold,
+                    const std::string& actor_identity = "localhost_dashboard");
+  void StartCalibration(
+      const std::string& client_id, int duration_seconds,
+      const std::string& actor_identity = "localhost_dashboard");
 
  private:
   grpc::ServerUnaryReactor* RecordMeasurement(

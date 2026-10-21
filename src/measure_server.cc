@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 
 #include "absl/flags/flag.h"
@@ -26,18 +29,43 @@ ABSL_FLAG(int, retention_days, 0,
           "Delete events older than this many days; 0 disables expiration");
 ABSL_FLAG(std::string, web_root, "dashboard/dist",
           "Directory containing the built dashboard frontend");
+ABSL_FLAG(std::string, server_cert, "", "PEM server certificate chain");
+ABSL_FLAG(std::string, server_key, "", "PEM server private key");
+ABSL_FLAG(std::string, client_ca, "",
+          "PEM CA certificate for device and operator certificates");
+
+std::string ReadFile(const std::string& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("Unable to read credential file: " + path);
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const std::string result = contents.str();
+  if (result.empty()) {
+    throw std::runtime_error("Credential file is empty: " + path);
+  }
+  return result;
+}
 
 void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements,
                const std::string& database_path, int retention_days,
-               const std::string& web_root) {
+               const std::string& web_root, const std::string& server_cert,
+               const std::string& server_key, const std::string& client_ca) {
   const std::string server_address = "0.0.0.0:" + std::to_string(port);
   MeasureServiceImpl service(max_measurements, database_path, retention_days);
   DashboardServer dashboard_server(http_port, service, web_root);
 
+  grpc::SslServerCredentialsOptions tls_options;
+  tls_options.pem_root_certs = ReadFile(client_ca);
+  tls_options.pem_key_cert_pairs.push_back(
+      {ReadFile(server_key), ReadFile(server_cert)});
+  tls_options.client_certificate_request =
+      GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
+
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
   ServerBuilder builder;
-  builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+  builder.AddListeningPort(server_address,
+                           grpc::SslServerCredentials(tls_options));
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
   std::cout << "Server listening on " << server_address << std::endl;
@@ -54,6 +82,9 @@ int main(int argc, char** argv) {
                 std::max(1, absl::GetFlag(FLAGS_samples_retained))),
             absl::GetFlag(FLAGS_database_path),
             absl::GetFlag(FLAGS_retention_days),
-            absl::GetFlag(FLAGS_web_root));
+            absl::GetFlag(FLAGS_web_root),
+            absl::GetFlag(FLAGS_server_cert),
+            absl::GetFlag(FLAGS_server_key),
+            absl::GetFlag(FLAGS_client_ca));
   return 0;
 }
