@@ -6,6 +6,8 @@ type Device = {
   connected: boolean
   latest_point: number | null
   timestamp_unix_ms: number
+  desired_revision: string
+  acknowledged_revision: string
 }
 
 type Event = {
@@ -318,11 +320,16 @@ function App() {
         return (
           <Panel key={id} id={id} title="Fleet Devices" {...dragProps}>
             <div className="table-scroll">
-              <table><thead><tr><th>Device</th><th>Status</th><th>Latest reading</th><th>Last seen</th></tr></thead>
+              <table><thead><tr><th>Device</th><th>Status</th><th>Command</th><th>Latest reading</th><th>Last seen</th></tr></thead>
                 <tbody>{data.devices.map(device => (
                   <tr key={device.client_id}>
                     <td>{device.client_id}</td>
                     <td><span className="status"><i className={device.connected ? 'online' : ''} />{device.connected ? 'Online' : 'Offline'}</span></td>
+                    <td title={`Desired revision: ${device.desired_revision}; last applied: ${device.acknowledged_revision}`}>
+                      {device.desired_revision === '0' ? 'Not subscribed'
+                        : device.desired_revision === device.acknowledged_revision ? 'Applied'
+                          : device.connected ? 'Awaiting acknowledgment' : 'Pending reconnect'}
+                    </td>
                     <td>{device.latest_point ?? '—'}</td><td>{timeLabel(device.timestamp_unix_ms)}</td>
                   </tr>
                 ))}</tbody>

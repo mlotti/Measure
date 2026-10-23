@@ -23,7 +23,7 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
   ~MeasureServiceImpl();
 
   void AddSubscriber(const std::string& client_id, SubscribeReactor* reactor);
-  void RemoveSubscriber(const std::string& client_id);
+  void RemoveSubscriber(const std::string& client_id, SubscribeReactor* reactor);
   std::vector<measure::StoredMeasurement> GetMeasurementsSnapshot() const;
   std::vector<measure::StoredMeasurement> GetLatestMeasurementsSnapshot() const;
   std::vector<measure::StoredEvent> GetEventsSnapshot(
@@ -33,6 +33,7 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
       int64_t bucket_ms, int64_t since_unix_ms = 0,
       int64_t until_unix_ms = 0, const std::string& client_id = "") const;
   std::vector<std::string> GetConnectedClients() const;
+  std::vector<measure::CommandDelivery> GetCommandDeliveries() const;
   int GetThreshold() const;
   void SetThreshold(int threshold,
                     const std::string& actor_identity = "localhost_dashboard");
@@ -43,7 +44,7 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
  private:
   grpc::ServerUnaryReactor* RecordMeasurement(
       grpc::CallbackServerContext* context, const measure::Measurement* request,
-      measure::Thumbs* reply) override;
+      measure::MeasurementReceipt* reply) override;
   grpc::ServerWriteReactor<measure::Command>* Subscribe(
       grpc::CallbackServerContext* context,
       const measure::ClientInfo* request) override;
@@ -51,20 +52,22 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
       grpc::CallbackServerContext* context,
       const measure::CalibrationRequest* request,
       measure::CalibrationResponse* reply) override;
+  grpc::ServerUnaryReactor* AcknowledgeCommand(
+      grpc::CallbackServerContext* context,
+      const measure::CommandAcknowledgment* request,
+      measure::CommandReceipt* reply) override;
 
-  void BroadcastCommand(const measure::Command& cmd);
-  void SendCommandToClient(const std::string& client_id,
-                           const measure::Command& cmd);
+  void PublishDesiredCommands(bool only_pending = false);
+  measure::Command MakeCommand(const std::string& client_id) const;
+  void RunDelivery();
 
   mutable std::mutex subscribers_mu_;
   std::map<std::string, SubscribeReactor*> subscribers_;
   measure::EventStore event_store_;
   size_t max_measurements_;
-  int current_threshold_ = 8;
-  std::mutex calibration_mu_;
-  std::condition_variable calibration_cv_;
+  std::condition_variable delivery_cv_;
   bool shutting_down_ = false;
-  std::vector<std::thread> calibration_threads_;
+  std::thread delivery_thread_;
 };
 
 #endif

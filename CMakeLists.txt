@@ -58,6 +58,11 @@ target_link_libraries(measure_service
   measurement_utils
   "${SQLITE3_LIBRARY}")
 
+add_library(measure_client_runtime src/measure_client_runtime.cc)
+target_compile_features(measure_client_runtime PUBLIC cxx_std_17)
+target_include_directories(measure_client_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(measure_client_runtime PUBLIC m_grpc_proto)
+
 # Targets measure_[async_](client|server)
 foreach(_target
   measure_client measure_server)
@@ -75,6 +80,7 @@ foreach(_target
 endforeach()
 target_sources(measure_server PRIVATE src/dashboard_server.cc)
 target_link_libraries(measure_server measurement_utils measure_service)
+target_link_libraries(measure_client measure_client_runtime)
 
 option(BUILD_TESTING "Build Measure tests" OFF)
 if(BUILD_TESTING)
