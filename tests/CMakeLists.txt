@@ -13,6 +13,7 @@ target_link_libraries(measure_service_tests
   PRIVATE
     Catch2::Catch2WithMain
     measure_service
+    measure_client_runtime
     m_grpc_proto)
 
 add_test(NAME measure_service_tests COMMAND measure_service_tests)
