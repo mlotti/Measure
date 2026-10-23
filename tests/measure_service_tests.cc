@@ -412,10 +412,13 @@ TEST_CASE("reconnecting during calibration preserves its original deadline") {
 }
 
 TEST_CASE("measurement admission rejects overflow and clients retry without data loss") {
-  const size_t limit = GENERATE(1, 3);
+  const size_t limit = GENERATE(1, 4);
   CAPTURE(limit);
   TemporaryDatabase database;
-  MeasureServiceImpl service(100, database.path, 0, limit);
+  auto service_instance = limit == 4
+      ? std::make_unique<MeasureServiceImpl>(100, database.path)
+      : std::make_unique<MeasureServiceImpl>(100, database.path, 0, limit);
+  auto& service = *service_instance;
   int port = 0;
   auto server = StartServer(service, &port);
   REQUIRE(server != nullptr);
@@ -489,7 +492,7 @@ TEST_CASE("measurement concurrency limit must be positive") {
 
 TEST_CASE("measurement admission capacity is released after storage errors") {
   TemporaryDatabase database;
-  MeasureServiceImpl service(10, database.path);
+  MeasureServiceImpl service(10, database.path, 0, 1);
   {
     DatabaseWriteLock write_lock(database.path);
     REQUIRE(sqlite3_exec(

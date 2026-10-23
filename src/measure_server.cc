@@ -23,7 +23,7 @@ ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 ABSL_FLAG(uint16_t, http_port, 8080, "HTTP port for the localhost dashboard");
 ABSL_FLAG(int, samples_retained, 500,
           "Maximum number of recent measurements retained by the dashboard");
-ABSL_FLAG(int, max_concurrent_measurements, 1,
+ABSL_FLAG(int, max_concurrent_measurements, 4,
           "Maximum concurrent measurement writes; excess requests must retry");
 ABSL_FLAG(std::string, database_path, "measure.db",
           "Path to the SQLite event database");

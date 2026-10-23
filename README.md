@@ -218,8 +218,8 @@ across retries and server restarts, even if the original response was lost.
 Reusing an ID with different data is rejected. Deduplication receipts are kept
 independently of history retention and currently have no automatic pruning.
 
-Measurement ingestion is bounded by `--max_concurrent_measurements=1` by default,
-matching SQLite's serialized write path. The limit must be positive and covers
+Measurement ingestion is bounded by `--max_concurrent_measurements=4` by default,
+allowing small bursts while SQLite serializes writes. The limit must be positive and covers
 measurement handlers entering storage, including those waiting for the event
 store lock. Admitted work runs on a fixed-size worker pool rather than blocking
 gRPC callback threads; queued plus running work cannot exceed the limit.

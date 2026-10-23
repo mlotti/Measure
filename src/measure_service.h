@@ -22,7 +22,7 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
   explicit MeasureServiceImpl(size_t max_measurements,
                               const std::string& database_path = ":memory:",
                               int retention_days = 0,
-                              size_t max_concurrent_measurements = 1);
+                              size_t max_concurrent_measurements = 4);
   ~MeasureServiceImpl();
 
   void AddSubscriber(const std::string& client_id, SubscribeReactor* reactor);
