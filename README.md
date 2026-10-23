@@ -218,6 +218,17 @@ across retries and server restarts, even if the original response was lost.
 Reusing an ID with different data is rejected. Deduplication receipts are kept
 independently of history retention and currently have no automatic pruning.
 
+Measurement ingestion is bounded by `--max_concurrent_measurements=1` by default,
+matching SQLite's serialized write path. The limit must be positive and covers
+measurement handlers entering storage, including those waiting for the event
+store lock. Admitted work runs on a fixed-size worker pool rather than blocking
+gRPC callback threads; queued plus running work cannot exceed the limit.
+Excess requests return `RESOURCE_EXHAUSTED` immediately without
+storing or acknowledging the reading. Clients retain those readings and retry
+with exponential backoff and jitter. Permits are released on both success and
+storage errors. This is admission control, not a server-side measurement queue
+or a sustained-rate limit; command RPCs do not consume measurement permits.
+
 The client's offline measurement buffer is FIFO, bounded to 1,000 entries, and
 **memory-only**: it survives network disconnects, not process exits. A full buffer
 explicitly rejects new readings instead of dropping old readings. The sample

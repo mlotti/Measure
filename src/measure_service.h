@@ -3,8 +3,10 @@
 
 #include <cstddef>
 #include <condition_variable>
+#include <functional>
 #include <map>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,7 +21,8 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
  public:
   explicit MeasureServiceImpl(size_t max_measurements,
                               const std::string& database_path = ":memory:",
-                              int retention_days = 0);
+                              int retention_days = 0,
+                              size_t max_concurrent_measurements = 1);
   ~MeasureServiceImpl();
 
   void AddSubscriber(const std::string& client_id, SubscribeReactor* reactor);
@@ -60,11 +63,19 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
   void PublishDesiredCommands(bool only_pending = false);
   measure::Command MakeCommand(const std::string& client_id) const;
   void RunDelivery();
+  void RunIngestion();
 
   mutable std::mutex subscribers_mu_;
   std::map<std::string, SubscribeReactor*> subscribers_;
   measure::EventStore event_store_;
   size_t max_measurements_;
+  const size_t max_concurrent_measurements_;
+  std::mutex ingestion_mu_;
+  std::condition_variable ingestion_cv_;
+  std::queue<std::function<void()>> ingestion_jobs_;
+  size_t active_measurements_ = 0;
+  bool ingestion_stopping_ = false;
+  std::vector<std::thread> ingestion_threads_;
   std::condition_variable delivery_cv_;
   bool shutting_down_ = false;
   std::thread delivery_thread_;

@@ -110,11 +110,29 @@ class RejectedSubscribeReactor : public grpc::ServerWriteReactor<Command> {
 
 MeasureServiceImpl::MeasureServiceImpl(size_t max_measurements,
                                        const std::string& database_path,
-                                       int retention_days)
+                                       int retention_days,
+                                       size_t max_concurrent_measurements)
     : event_store_(database_path, retention_days),
-      max_measurements_(max_measurements) {
+      max_measurements_(max_measurements),
+      max_concurrent_measurements_(max_concurrent_measurements) {
+  if (max_concurrent_measurements_ == 0) {
+    throw std::invalid_argument("Measurement concurrency limit must be positive.");
+  }
   event_store_.ExpireCalibrations(CurrentTimeMillis());
-  delivery_thread_ = std::thread([this] { RunDelivery(); });
+  try {
+    for (size_t i = 0; i < max_concurrent_measurements_; ++i) {
+      ingestion_threads_.emplace_back([this] { RunIngestion(); });
+    }
+    delivery_thread_ = std::thread([this] { RunDelivery(); });
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> lock(ingestion_mu_);
+      ingestion_stopping_ = true;
+    }
+    ingestion_cv_.notify_all();
+    for (auto& thread : ingestion_threads_) thread.join();
+    throw;
+  }
 }
 
 MeasureServiceImpl::~MeasureServiceImpl() {
@@ -124,6 +142,28 @@ MeasureServiceImpl::~MeasureServiceImpl() {
   }
   delivery_cv_.notify_all();
   delivery_thread_.join();
+  {
+    std::lock_guard<std::mutex> lock(ingestion_mu_);
+    ingestion_stopping_ = true;
+  }
+  ingestion_cv_.notify_all();
+  for (auto& thread : ingestion_threads_) thread.join();
+}
+
+void MeasureServiceImpl::RunIngestion() {
+  while (true) {
+    std::function<void()> job;
+    {
+      std::unique_lock<std::mutex> lock(ingestion_mu_);
+      ingestion_cv_.wait(lock, [this] {
+        return ingestion_stopping_ || !ingestion_jobs_.empty();
+      });
+      if (ingestion_jobs_.empty()) return;
+      job = std::move(ingestion_jobs_.front());
+      ingestion_jobs_.pop();
+    }
+    job();
+  }
 }
 
 measure::Command MeasureServiceImpl::MakeCommand(
@@ -263,20 +303,36 @@ grpc::ServerUnaryReactor* MeasureServiceImpl::RecordMeasurement(
                            "ID of at most 128 bytes."));
     return reactor;
   }
-  try {
-    const bool inserted = event_store_.RecordMeasurement(
-        {request->client_id(), request->point(),
-         request->timestamp_unix_ms() > 0 ? request->timestamp_unix_ms()
-                                          : CurrentTimeMillis(),
-         request->measurement_id()});
-    reply->set_duplicate(!inserted);
-    reply->set_measurement_id(request->measurement_id());
-    reactor->Finish(Status::OK);
-  } catch (const std::invalid_argument& error) {
-    reactor->Finish(Status(grpc::StatusCode::ALREADY_EXISTS, error.what()));
-  } catch (const std::exception& error) {
-    reactor->Finish(Status(grpc::StatusCode::INTERNAL, error.what()));
+  std::lock_guard<std::mutex> lock(ingestion_mu_);
+  if (ingestion_stopping_ ||
+      active_measurements_ >= max_concurrent_measurements_) {
+    reactor->Finish(Status(grpc::StatusCode::RESOURCE_EXHAUSTED,
+                           "Measurement ingestion is full; retry with backoff."));
+    return reactor;
   }
+  ingestion_jobs_.push([this, request, reply, reactor] {
+    Status status;
+    try {
+      const bool inserted = event_store_.RecordMeasurement(
+          {request->client_id(), request->point(),
+           request->timestamp_unix_ms() > 0 ? request->timestamp_unix_ms()
+                                            : CurrentTimeMillis(),
+           request->measurement_id()});
+      reply->set_duplicate(!inserted);
+      reply->set_measurement_id(request->measurement_id());
+    } catch (const std::invalid_argument& error) {
+      status = Status(grpc::StatusCode::ALREADY_EXISTS, error.what());
+    } catch (const std::exception& error) {
+      status = Status(grpc::StatusCode::INTERNAL, error.what());
+    }
+    {
+      std::lock_guard<std::mutex> lock(ingestion_mu_);
+      --active_measurements_;
+    }
+    reactor->Finish(status);
+  });
+  ++active_measurements_;
+  ingestion_cv_.notify_one();
   return reactor;
 }
 
