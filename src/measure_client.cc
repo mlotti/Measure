@@ -1,10 +1,15 @@
 #include <chrono>
+#include <cerrno>
+#include <csignal>
 #include <fstream>
 #include <iostream>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+
+#include <poll.h>
+#include <unistd.h>
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
@@ -18,6 +23,41 @@ ABSL_FLAG(int, duration, 10, "Calibration duration in seconds (operator mode)");
 ABSL_FLAG(std::string, root_cert, "", "PEM CA certificate for the server");
 ABSL_FLAG(std::string, client_cert, "", "PEM device or operator certificate");
 ABSL_FLAG(std::string, client_key, "", "PEM device or operator private key");
+
+namespace {
+
+volatile std::sig_atomic_t stop_requested = 0;
+
+void RequestStop(int) { stop_requested = 1; }
+
+bool WaitForInput(bool* input_open) {
+  pollfd input{STDIN_FILENO, POLLIN, 0};
+  const int result = poll(*input_open ? &input : nullptr,
+                          *input_open ? 1 : 0, 100);
+  if (result < 0) {
+    if (errno == EINTR) return false;
+    throw std::runtime_error("Unable to poll terminal input.");
+  }
+  if (result == 0) return false;
+  if (input.revents & (POLLERR | POLLNVAL)) {
+    throw std::runtime_error("Terminal input is unavailable.");
+  }
+  if (input.revents & (POLLIN | POLLHUP)) {
+    char buffer[256];
+    const auto count = read(STDIN_FILENO, buffer, sizeof(buffer));
+    if (count < 0) {
+      if (errno == EINTR) return false;
+      throw std::runtime_error("Unable to read terminal input.");
+    }
+    if (count == 0) *input_open = false;
+    for (ssize_t i = 0; i < count; ++i) {
+      if (buffer[i] == 'q') return true;
+    }
+  }
+  return false;
+}
+
+}
 
 std::string ReadFile(const std::string& path) {
   std::ifstream input(path, std::ios::binary);
@@ -44,29 +84,39 @@ int main(int argc, char** argv) {
     if (absl::GetFlag(FLAGS_calibrate)) {
       return client.SetCalibrationMode("", absl::GetFlag(FLAGS_duration)) ? 0 : 1;
     }
+    std::signal(SIGINT, RequestStop);
+    std::signal(SIGTERM, RequestStop);
     client.Start();
-    if (!client.WaitForCommand(std::chrono::seconds(5))) {
-      std::cerr << "No initial command received; refusing to sample with an "
-                   "unknown threshold." << std::endl;
-      return 1;
-    }
+    std::cout << "Measuring every 3 seconds. Press Ctrl+C or enter q to quit."
+              << std::endl;
+    std::cout << "Waiting for initial command before sampling." << std::endl;
 
     std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<> dis(0, 10);
     bool queued = true;
-    for (int i = 0; i < 10; ++i) {
-      const int value = dis(gen);
-      const int threshold = client.GetThreshold();
-      std::cout << "Generated random number: " << value << std::endl;
-      if (value > threshold) {
-        queued = client.RecordMeasurement(value) && queued;
-        std::cout << "Measured: " << value << " (threshold=" << threshold << ")"
-                  << std::endl;
-      } else {
-        std::cout << "Value " << value << " not sent (not above threshold "
-                  << threshold << ")" << std::endl;
+    bool input_open = true;
+    auto next_sample = std::chrono::steady_clock::now();
+    while (!stop_requested && !client.HasFailed()) {
+      if (WaitForInput(&input_open) || stop_requested) break;
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= next_sample &&
+          client.WaitForCommand(std::chrono::milliseconds(0))) {
+        const int value = dis(gen);
+        const int threshold = client.GetThreshold();
+        std::cout << "Generated random number: " << value << std::endl;
+        if (value > threshold) {
+          queued = client.RecordMeasurement(value) && queued;
+          std::cout << "Measured: " << value << " (threshold=" << threshold << ")"
+                    << std::endl;
+        } else {
+          std::cout << "Value " << value << " not sent (not above threshold "
+                    << threshold << ")" << std::endl;
+        }
+        next_sample = now + std::chrono::seconds(3);
       }
     }
+    std::cout << "Sampling stopped; draining buffered measurements (up to 30 seconds)."
+              << std::endl;
     const bool delivered = client.WaitForMeasurements(std::chrono::seconds(30));
     if (!delivered) {
       std::cerr << "Exiting with " << client.PendingMeasurements()

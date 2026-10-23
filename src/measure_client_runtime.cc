@@ -105,6 +105,11 @@ size_t MeasureClient::PendingMeasurements() const {
   return pending_.size();
 }
 
+bool MeasureClient::HasFailed() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return failed_;
+}
+
 void MeasureClient::Fail(const std::string& message) {
   std::lock_guard<std::mutex> lock(mu_);
   std::cerr << message << std::endl;

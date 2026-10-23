@@ -207,7 +207,11 @@ The client reconnects with exponential backoff (100 ms to 5 seconds, plus up to
 25% jitter). Subscription attempts have a 30-second deadline so a broken
 connection does not remain undetected indefinitely. Authentication, authorization,
 and incompatible-protocol failures stop the client rather than retrying forever.
-The sample refuses to generate readings until it receives its initial state.
+The client waits for its initial state before generating readings, continuing
+to reconnect if the server is unavailable. It then samples every three seconds
+until Ctrl+C (or SIGTERM) or `q` followed by Enter. Terminal input and shutdown
+remain responsive between samples without a blocking sampling sleep. Closed
+stdin does not stop a headless client. Permanent RPC failures still exit nonzero.
 
 Measurement delivery uses gRPC status and a `MeasurementReceipt`, replacing the
 old thumbs response. `OK` means storage committed; errors are never reported as
@@ -232,7 +236,7 @@ or a sustained-rate limit; command RPCs do not consume measurement permits.
 The client's offline measurement buffer is FIFO, bounded to 1,000 entries, and
 **memory-only**: it survives network disconnects, not process exits. A full buffer
 explicitly rejects new readings instead of dropping old readings. The sample
-waits up to 30 seconds to drain before exiting and exits nonzero if anything is
+stops sampling on shutdown, waits up to 30 seconds to drain before exiting, and exits nonzero if anything is
 undelivered. Deployments requiring client-crash recovery need a durable local
 outbox; no exactly-once physical action guarantee is claimed.
 

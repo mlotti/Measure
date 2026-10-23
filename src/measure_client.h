@@ -26,6 +26,7 @@ class MeasureClient {
   bool RecordMeasurement(int value);
   bool WaitForMeasurements(std::chrono::milliseconds timeout);
   size_t PendingMeasurements() const;
+  bool HasFailed() const;
   bool SetCalibrationMode(const std::string& target_client_id,
                           int duration_seconds);
 
