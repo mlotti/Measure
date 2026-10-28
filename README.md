@@ -78,7 +78,9 @@ The build also requires the SQLite3 development headers and library.
 
 Catch2 v3 unit and gRPC integration tests are available through CTest. The
 integration tests verify that subscribers receive threshold and calibration
-commands and that measurement RPCs acknowledge and store measurements. Enable
+commands, acknowledge their application, and reconnect after server restarts.
+They also cover calibration expiry, latest-wins state recovery, bounded offline
+buffering, and idempotent measurement retries. Enable
 tests when configuring:
 ```bash
 cmake -S . -B build -DBUILD_TESTING=ON -DGRPC_FETCHCONTENT=ON
@@ -127,6 +129,7 @@ http://127.0.0.1:8080/
 The dashboard provides:
 
 - connected/offline device status, latest reading, and last-seen time
+- per-device command state: applied, awaiting acknowledgment, or pending reconnect
 - fleet-wide threshold updates pushed to subscribed clients
 - calibration for all connected clients or one selected device
 - recent measurement chart and event history
@@ -166,10 +169,92 @@ Calibration events record the authenticated operator certificate identity.
 Dashboard-originated actions are identified as `localhost_dashboard`.
 
 This establishes authenticated device identity and basic operator authorization.
-The current command stream is still transient: command IDs, device acknowledgments,
-durable pending commands, retry/reconnect guarantees, and per-device outcomes
-remain follow-up work. Tenant and device-group modeling and bulk targeting are
-also outside this slice and belong to issue #10.
+Tenant and device-group modeling and bulk targeting remain outside this slice
+and belong to issue #10.
+
+## Delivery and recovery guarantees
+
+Commands represent **latest desired state**, not a queue of actions to replay.
+The server commits each state change and its audit event to SQLite before
+publishing it. Each change has a monotonically increasing revision, which
+survives server restarts. A reconnecting device receives only its latest state.
+This also establishes the delivery model for future destination commands:
+reconnect should restore the latest destination, not replay earlier directions.
+
+- A fleet threshold update supersedes earlier threshold and calibration state,
+  including state for disconnected devices. New devices receive that threshold.
+- Calibration targets one named device (including an offline device through
+  gRPC), or a snapshot of all currently connected devices for a broadcast.
+  Its absolute expiry is fixed at acceptance, not at delivery or reconnection.
+  Reconnecting before expiry resumes only the remaining time; reconnecting
+  after expiry receives normal state. The client also restores the normal
+  threshold locally at expiry if disconnected. Device/server clocks must be
+  synchronized for this deadline behavior.
+- A newer calibration replaces an older calibration for the same device; old
+  deadlines cannot cancel the replacement. A single server delivery worker
+  restores expired state, including after a restart.
+- Devices acknowledge **application** of a revision through
+  `AcknowledgeCommand`. A successful stream write is not an acknowledgment.
+  The server retries unacknowledged latest state about once per second and
+  stores per-device acknowledged revisions and audit events. Duplicate
+  acknowledgments are idempotent; superseded, expired, or unknown revisions
+  are rejected. The dashboard distinguishes saved state from device application.
+- Each subscription retains at most one in-flight and one newest pending
+  snapshot. A replacement connection cannot be unregistered by the old
+  connection's cleanup.
+
+The client reconnects with exponential backoff (100 ms to 5 seconds, plus up to
+25% jitter). Subscription attempts have a 30-second deadline so a broken
+connection does not remain undetected indefinitely. Authentication, authorization,
+and incompatible-protocol failures stop the client rather than retrying forever.
+The client waits for its initial state before generating readings, continuing
+to reconnect if the server is unavailable. It then samples every three seconds
+until Ctrl+C (or SIGTERM) or `q` followed by Enter. Terminal input and shutdown
+remain responsive between samples without a blocking sampling sleep. Closed
+stdin does not stop a headless client. Permanent RPC failures still exit nonzero.
+
+Measurement delivery uses gRPC status and a `MeasurementReceipt`, replacing the
+old thumbs response. `OK` means storage committed; errors are never reported as
+success. The client assigns a stable measurement ID and timestamp before
+buffering, retries transient failures with a two-second RPC deadline, and checks
+that the receipt matches the ID. SQLite deduplicates `(client_id, measurement_id)`
+across retries and server restarts, even if the original response was lost.
+Reusing an ID with different data is rejected. Deduplication receipts are kept
+independently of history retention and currently have no automatic pruning.
+
+Measurement ingestion is bounded by `--max_concurrent_measurements=4` by default,
+allowing small bursts while SQLite serializes writes. The limit must be positive and covers
+measurement handlers entering storage, including those waiting for the event
+store lock. Admitted work runs on a fixed-size worker pool rather than blocking
+gRPC callback threads; queued plus running work cannot exceed the limit.
+Excess requests return `RESOURCE_EXHAUSTED` immediately without
+storing or acknowledging the reading. Clients retain those readings and retry
+with exponential backoff and jitter. Permits are released on both success and
+storage errors. This is admission control, not a server-side measurement queue
+or a sustained-rate limit; command RPCs do not consume measurement permits.
+
+The client's offline measurement buffer is FIFO, bounded to 1,000 entries, and
+**memory-only**: it survives network disconnects, not process exits. A full buffer
+explicitly rejects new readings instead of dropping old readings. The sample
+stops sampling on shutdown, waits up to 30 seconds to drain before exiting, and exits nonzero if anything is
+undelivered. Deployments requiring client-crash recovery need a durable local
+outbox; no exactly-once physical action guarantee is claimed.
+
+### Protocol compatibility
+
+`ClientInfo.protocol_version=1` enables versioned commands and acknowledgments.
+Unknown subscription versions are rejected with `FAILED_PRECONDITION`.
+Version 0 remains accepted for old clients, but does not provide application
+acknowledgments or automatic command retries, and old clients do not enforce
+calibration expiry while offline. New clients require version 1 responses.
+
+Existing measurement request fields and RPC names are unchanged. The old
+response's field 1 is reserved, so old protobuf clients can decode the new
+receipt, but should use gRPC status for success. Measurements without an ID
+remain accepted for legacy clients and cannot be deduplicated. Calibration
+duration 0 retains the legacy ten-second default; other durations must be
+between 1 and 3,600 seconds. SQLite adds the delivery and receipt tables on
+startup without discarding existing events.
 
 The dashboard data is available from:
 

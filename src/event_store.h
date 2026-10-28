@@ -16,6 +16,19 @@ struct StoredMeasurement {
   std::string client_id;
   int point;
   int64_t timestamp_unix_ms;
+  std::string measurement_id;
+};
+
+struct DesiredCommand {
+  int64_t revision;
+  int threshold;
+  int64_t expires_unix_ms;
+};
+
+struct CommandDelivery {
+  std::string client_id;
+  int64_t desired_revision;
+  int64_t acknowledged_revision;
 };
 
 struct StoredEvent {
@@ -46,7 +59,7 @@ class EventStore {
   EventStore(const EventStore&) = delete;
   EventStore& operator=(const EventStore&) = delete;
 
-  void RecordMeasurement(const StoredMeasurement& measurement);
+  bool RecordMeasurement(const StoredMeasurement& measurement);
   void RecordEvent(const std::string& event_type, int64_t timestamp_unix_ms,
                    const std::string& client_id, const std::string& payload_json,
                    std::optional<int> point = std::nullopt,
@@ -62,9 +75,24 @@ class EventStore {
       int64_t until_unix_ms = 0,
       const std::string& client_id = "") const;
   int GetLatestThreshold(int fallback) const;
+  DesiredCommand GetDesiredCommand(const std::string& client_id) const;
+  void RegisterDevice(const std::string& client_id);
+  void SetDesiredThreshold(int threshold, const std::string& actor);
+  void SetDesiredCalibration(const std::vector<std::string>& clients,
+                             int64_t expires_unix_ms, const std::string& actor);
+  bool ExpireCalibrations(int64_t now_unix_ms);
+  bool AcknowledgeCommand(const std::string& client_id, int64_t revision);
+  std::vector<CommandDelivery> GetCommandDeliveries() const;
 
  private:
   void PruneExpiredEvents();
+  void InsertEvent(const std::string& event_type, int64_t timestamp_unix_ms,
+                   const std::string& client_id, const std::string& payload_json,
+                   std::optional<int> point, std::optional<int> threshold,
+                   const std::string& mode);
+  DesiredCommand ReadDesiredCommand(const std::string& client_id) const;
+  DesiredCommand WriteDesiredCommand(const std::string& client_id, int threshold,
+                                     int64_t expires_unix_ms);
 
   sqlite3* database_ = nullptr;
   int retention_days_;

@@ -13,6 +13,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -230,7 +231,13 @@ std::string BuildDashboardJson(const MeasureServiceImpl& service) {
   const auto measurements = service.GetMeasurementsSnapshot();
   const auto latest_measurements = service.GetLatestMeasurementsSnapshot();
   const auto connected = service.GetConnectedClients();
+  const auto deliveries = service.GetCommandDeliveries();
   std::set<std::string> client_ids(connected.begin(), connected.end());
+  std::map<std::string, measure::CommandDelivery> command_delivery;
+  for (const auto& delivery : deliveries) {
+    client_ids.insert(delivery.client_id);
+    command_delivery.emplace(delivery.client_id, delivery);
+  }
   std::map<std::string, measure::StoredMeasurement> latest;
   for (const auto& measurement : latest_measurements) {
     client_ids.insert(measurement.client_id);
@@ -253,7 +260,14 @@ std::string BuildDashboardJson(const MeasureServiceImpl& service) {
             "\",\"connected\":" + (is_connected ? "true" : "false") +
             ",\"latest_point\":";
     json += has_measurement ? std::to_string(measurement->second.point) : "null";
-    json += ",\"timestamp_unix_ms\":" +
+    const auto delivery = command_delivery.find(client_id);
+    json += ",\"desired_revision\":\"" +
+            std::to_string(delivery != command_delivery.end()
+                               ? delivery->second.desired_revision : 0) +
+            "\",\"acknowledged_revision\":\"" +
+            std::to_string(delivery != command_delivery.end()
+                               ? delivery->second.acknowledged_revision : 0) +
+            "\",\"timestamp_unix_ms\":" +
             std::to_string(has_measurement
                                ? measurement->second.timestamp_unix_ms
                                : 0) +
@@ -404,7 +418,8 @@ void HandlePost(int client_fd, const HttpRequest& request,
     }
     service.SetThreshold(threshold);
     SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
-                     "{\"message\":\"Fleet threshold updated.\"}");
+                     "{\"message\":\"Latest fleet threshold saved; device "
+                     "application is acknowledged separately.\"}");
     return;
   }
   if (request.path == "/api/calibration") {
@@ -427,9 +442,15 @@ void HandlePost(int client_fd, const HttpRequest& request,
         return;
       }
     }
-    service.StartCalibration(client_id, duration);
+    try {
+      service.StartCalibration(client_id, duration);
+    } catch (const std::invalid_argument& error) {
+      SendApiError(client_fd, "400 Bad Request", error.what());
+      return;
+    }
     SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
-                     "{\"message\":\"Calibration started.\"}");
+                     "{\"message\":\"Calibration saved with a fixed expiry; "
+                     "device application is acknowledged separately.\"}");
     return;
   }
   SendApiError(client_fd, "404 Not Found", "Not found.");

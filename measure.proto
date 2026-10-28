@@ -16,11 +16,13 @@ enum Mode {
 // The service definition.
 service Measure {
   // Sends a measurement
-  rpc RecordMeasurement (Measurement) returns (Thumbs) {}
+  rpc RecordMeasurement (Measurement) returns (MeasurementReceipt) {}
   // Subscribes a client to server-pushed threshold commands.
   rpc Subscribe (ClientInfo) returns (stream Command) {}
   // Operator command: put named client (or all clients) into calibration mode.
   rpc SetCalibrationMode (CalibrationRequest) returns (CalibrationResponse) {}
+  // Acknowledge applying the latest desired state, not merely receiving bytes.
+  rpc AcknowledgeCommand (CommandAcknowledgment) returns (CommandReceipt) {}
 }
 
 // The request containing the measurement
@@ -28,23 +30,42 @@ message Measurement {
   int32 point = 1;
   string client_id = 2;
   int64 timestamp_unix_ms = 3;
+  // Stable across retries; omitted only by legacy clients.
+  string measurement_id = 4;
 }
 
-// The response giving thumbs up or down
-message Thumbs {
-  int32 response = 1;
+// OK means the measurement is durably stored (including duplicate retries).
+message MeasurementReceipt {
+  reserved 1;
+  reserved "response";
+  bool duplicate = 2;
+  string measurement_id = 3;
 }
 
 // Identifies a subscribing client.
 message ClientInfo {
   string client_id = 1;
+  // 0 is the legacy, unacknowledged stream; 1 supports latest-state delivery.
+  uint32 protocol_version = 2;
 }
 
 // Server-pushed command that sets the client's measurement threshold.
 message Command {
   int32 threshold = 1;
   Mode mode = 2;
+  int64 revision = 3;
+  int64 expires_unix_ms = 4;
+  uint32 protocol_version = 5;
+  // Local fallback if calibration expires while disconnected.
+  int32 normal_threshold = 6;
 }
+
+message CommandAcknowledgment {
+  string client_id = 1;
+  int64 revision = 2;
+}
+
+message CommandReceipt {}
 
 // Request to enter calibration mode.
 message CalibrationRequest {
