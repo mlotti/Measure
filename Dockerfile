@@ -27,6 +27,16 @@ COPY src/ ./src/
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build --parallel 2
 
+FROM cpp-build AS cpp-tests
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git openssl python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY tests/ ./tests/
+RUN cmake -S . -B build -DBUILD_TESTING=ON \
+    && cmake --build build --parallel 2 \
+    && ctest --test-dir build --output-on-failure
+
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

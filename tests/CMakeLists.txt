@@ -35,3 +35,10 @@ target_link_libraries(dashboard_server_tests
     measure_service)
 
 add_test(NAME dashboard_server_tests COMMAND dashboard_server_tests)
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME healthcheck_tests
+  COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/healthcheck_tests.py"
+    "$<TARGET_FILE:measure_healthcheck>")
+set_tests_properties(healthcheck_tests PROPERTIES TIMEOUT 30)

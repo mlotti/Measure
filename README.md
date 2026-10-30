@@ -162,6 +162,28 @@ docker run --rm --user 0:0 \
   --entrypoint sh measure:demo /tests/demo_credentials_tests.sh
 ```
 
+Health-probe tests cover successful and fragmented HTTP responses, invalid
+statuses, connection refusal, and the two-second timeout. They run through
+CTest and require Python 3 and a free local port 8080.
+The container test target runs all C++ and health-probe suites:
+
+```bash
+docker build --target cpp-tests -t measure:cpp-tests .
+```
+
+After building the demo image, run the Compose smoke test:
+
+```bash
+python3 tests/compose_smoke_tests.py
+```
+
+It uses a unique Compose project and temporary host port, checks device reporting,
+role-scoped read-only credentials, operator authorization, and persistence across
+container recreation, then removes only its own containers and volumes.
+The `Deployment tests` GitHub Actions workflow runs these checks and the credential
+regressions on pull requests and pushes to `main`. Docker Compose 2.24.4 or newer
+is required for the smoke test's port override.
+
 ## Run
 
 Start the server:
