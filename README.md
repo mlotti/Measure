@@ -1,5 +1,23 @@
 # Measure
 
+## Quick start
+
+With Docker and Docker Compose installed, clone this repository and run the demo:
+
+```bash
+git clone https://github.com/mlotti/Measure.git
+cd Measure
+docker compose up --build
+```
+
+Open **http://127.0.0.1:8080/** to see a simulated device reporting measurements.
+Try changing its threshold or starting calibration in the dashboard.
+The first run builds the application and may take a few minutes; certificates
+and persistent storage are set up automatically.
+
+Press Ctrl+C to stop. This is a local demo, not a production deployment.
+See [demo deployment details](#quick-demo-deployment) for cleanup and reset commands.
+
 `Measure` is a small gRPC-based measurement system:
 - one server accepts measurements from multiple clients
 - each client can subscribe to server-pushed threshold commands
