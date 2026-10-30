@@ -95,6 +95,14 @@ Stop the demo with Ctrl+C or `docker compose down`; both leave the database and
 demo certificates in Docker-managed volumes. To remove those volumes and reset
 the demo, run `docker compose down -v`.
 
+Server, device, and operator credentials live in separate volumes. Only the
+certificate generator mounts all three; each runtime container mounts only its
+own credentials and the public CA certificate. The CA private key is temporary
+and is not persisted. Upgrading from the earlier shared-volume demo generates
+new role-specific credentials without removing the measurement database.
+The old shared `demo-certificates` volume is no longer mounted and should be
+removed after stopping containers that still use it.
+
 The demo publishes its dashboard and gRPC ports only on host loopback. Its
 health check uses a small native HTTP probe with a two-second deadline rather
 than curl, so the runtime image needs neither curl nor Debian's Brotli library.

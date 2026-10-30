@@ -4,7 +4,9 @@ services:
     entrypoint: ["/usr/local/bin/generate-demo-certs"]
     user: "0:0"
     volumes:
-      - demo-certificates:/run/measure/certs
+      - demo-server-certificates:/run/measure/demo-certificates/server
+      - demo-device-certificates:/run/measure/demo-certificates/device
+      - demo-operator-certificates:/run/measure/demo-certificates/operator
 
   measure-server:
     image: measure:demo
@@ -26,7 +28,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - measure-data:/var/lib/measure
-      - demo-certificates:/run/measure/certs:ro
+      - demo-server-certificates:/run/measure/certs:ro
     healthcheck:
       test:
         - CMD
@@ -50,7 +52,7 @@ services:
       - --client_key=/run/measure/certs/device.key
     init: true
     volumes:
-      - demo-certificates:/run/measure/certs:ro
+      - demo-device-certificates:/run/measure/certs:ro
 
   demo-operator:
     image: measure:demo
@@ -68,8 +70,10 @@ services:
       - --client_cert=/run/measure/certs/operator.crt
       - --client_key=/run/measure/certs/operator.key
     volumes:
-      - demo-certificates:/run/measure/certs:ro
+      - demo-operator-certificates:/run/measure/certs:ro
 
 volumes:
   measure-data:
-  demo-certificates:
+  demo-server-certificates:
+  demo-device-certificates:
+  demo-operator-certificates:

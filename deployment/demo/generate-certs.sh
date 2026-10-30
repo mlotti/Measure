@@ -1,22 +1,29 @@
 #!/bin/sh
 set -eu
 
-cert_dir=/run/measure/certs
+umask 077
+cert_dir=/run/measure/demo-certificates
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
-if [ -s "$cert_dir/ca.crt" ] &&
-   [ -s "$cert_dir/server.crt" ] &&
-   [ -s "$cert_dir/server.key" ] &&
-   [ -s "$cert_dir/device.crt" ] &&
-   [ -s "$cert_dir/device.key" ] &&
-   [ -s "$cert_dir/operator.crt" ] &&
-   [ -s "$cert_dir/operator.key" ]; then
-  exit 0
-fi
+complete=true
+nonempty=false
+for role in server device operator; do
+  role_dir="$cert_dir/$role"
+  if [ ! -s "$role_dir/ca.crt" ] ||
+     [ ! -s "$role_dir/$role.crt" ] ||
+     [ ! -s "$role_dir/$role.key" ]; then
+    complete=false
+  fi
+  if [ -n "$(ls -A "$role_dir")" ]; then
+    nonempty=true
+  fi
+done
 
-if [ -n "$(ls -A "$cert_dir")" ]; then
-  echo "Demo certificate volume is incomplete; run 'docker compose down -v' to reset it." >&2
+if [ "$complete" = true ]; then exit 0; fi
+
+if [ "$nonempty" = true ]; then
+  echo "Demo certificate volumes are incomplete; reset all three role certificate volumes before retrying." >&2
   exit 1
 fi
 
@@ -54,13 +61,9 @@ openssl x509 -req -days 365 -sha256 \
 create_client_certificate device "device:demo-device"
 create_client_certificate operator "operator:demo"
 
-cp "$work_dir/ca.crt" "$cert_dir/ca.crt"
-cp "$work_dir/server.crt" "$cert_dir/server.crt"
-cp "$work_dir/server.key" "$cert_dir/server.key"
-cp "$work_dir/device.crt" "$cert_dir/device.crt"
-cp "$work_dir/device.key" "$cert_dir/device.key"
-cp "$work_dir/operator.crt" "$cert_dir/operator.crt"
-cp "$work_dir/operator.key" "$cert_dir/operator.key"
-chown -R 10001:10001 "$cert_dir"
-chmod 0400 "$cert_dir"/*.key
-chmod 0444 "$cert_dir"/*.crt
+for role in server device operator; do
+  role_dir="$cert_dir/$role"
+  install -o 10001 -g 10001 -m 0444 "$work_dir/ca.crt" "$role_dir/ca.crt"
+  install -o 10001 -g 10001 -m 0444 "$work_dir/$role.crt" "$role_dir/$role.crt"
+  install -o 10001 -g 10001 -m 0400 "$work_dir/$role.key" "$role_dir/$role.key"
+done
