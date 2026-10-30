@@ -21,6 +21,8 @@ using grpc::ServerBuilder;
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 ABSL_FLAG(uint16_t, http_port, 8080, "HTTP port for the localhost dashboard");
+ABSL_FLAG(std::string, http_bind_address, "127.0.0.1",
+          "IPv4 address for the dashboard listener");
 ABSL_FLAG(int, samples_retained, 500,
           "Maximum number of recent measurements retained by the dashboard");
 ABSL_FLAG(int, max_concurrent_measurements, 4,
@@ -51,12 +53,14 @@ std::string ReadFile(const std::string& path) {
 void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements,
                size_t max_concurrent_measurements,
                const std::string& database_path, int retention_days,
-               const std::string& web_root, const std::string& server_cert,
+               const std::string& web_root, const std::string& http_bind_address,
+               const std::string& server_cert,
                const std::string& server_key, const std::string& client_ca) {
   const std::string server_address = "0.0.0.0:" + std::to_string(port);
   MeasureServiceImpl service(max_measurements, database_path, retention_days,
                              max_concurrent_measurements);
-  DashboardServer dashboard_server(http_port, service, web_root);
+  DashboardServer dashboard_server(http_port, service, web_root,
+                                   http_bind_address);
 
   grpc::SslServerCredentialsOptions tls_options;
   tls_options.pem_root_certs = ReadFile(client_ca);
@@ -93,6 +97,7 @@ int main(int argc, char** argv) {
             absl::GetFlag(FLAGS_database_path),
             absl::GetFlag(FLAGS_retention_days),
             absl::GetFlag(FLAGS_web_root),
+            absl::GetFlag(FLAGS_http_bind_address),
             absl::GetFlag(FLAGS_server_cert),
             absl::GetFlag(FLAGS_server_key),
             absl::GetFlag(FLAGS_client_ca));

@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -25,8 +26,6 @@
 #include "measurement_utils.h"
 
 namespace {
-
-constexpr char kHttpBindAddress[] = "127.0.0.1";
 
 struct HttpRequest {
   std::string method;
@@ -633,8 +632,12 @@ void HandleHttpClient(int client_fd, MeasureServiceImpl& service,
 }  // namespace
 
 DashboardServer::DashboardServer(uint16_t port, MeasureServiceImpl& service,
-                                 std::string web_root)
-    : port_(port), service_(service), web_root_(std::move(web_root)) {}
+                                 std::string web_root,
+                                 std::string bind_address)
+    : port_(port),
+      service_(service),
+      web_root_(std::move(web_root)),
+      bind_address_(std::move(bind_address)) {}
 
 DashboardServer::~DashboardServer() { Stop(); }
 
@@ -668,12 +671,17 @@ void DashboardServer::Run() {
   setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
   sockaddr_in address{};
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (inet_pton(AF_INET, bind_address_.c_str(), &address.sin_addr) != 1) {
+    std::cerr << "Invalid dashboard bind address: " << bind_address_
+              << std::endl;
+    CloseServerSocket();
+    return;
+  }
   address.sin_port = htons(port_);
 
   if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) <
       0) {
-    std::cerr << "Failed to bind dashboard server on " << kHttpBindAddress
+    std::cerr << "Failed to bind dashboard server on " << bind_address_
               << ":" << port_ << ": " << std::strerror(errno) << std::endl;
     CloseServerSocket();
     return;
@@ -685,7 +693,7 @@ void DashboardServer::Run() {
     return;
   }
 
-  std::cout << "Fleet dashboard available at http://" << kHttpBindAddress << ":"
+  std::cout << "Fleet dashboard available at http://" << bind_address_ << ":"
             << port_ << std::endl;
   while (!stop_requested_.load()) {
     const int client_fd = accept(server_fd, nullptr, nullptr);

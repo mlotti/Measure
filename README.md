@@ -74,6 +74,35 @@ CMake generates the protobuf and gRPC sources as part of the build.
 
 The build also requires the SQLite3 development headers and library.
 
+## Quick demo deployment
+
+Docker Compose builds the server and dashboard, generates local demo-only
+certificates, starts a sample device, and persists the event database:
+
+```bash
+docker compose up --build
+```
+
+Open the dashboard at <http://127.0.0.1:8080/>. The sample device generates
+measurements automatically. To issue a ten-second calibration command from a
+second terminal:
+
+```bash
+docker compose run --rm demo-operator
+```
+
+Stop the demo with Ctrl+C or `docker compose down`; both leave the database and
+demo certificates in Docker-managed volumes. To remove those volumes and reset
+the demo, run `docker compose down -v`.
+
+The demo publishes its dashboard and gRPC ports only on host loopback. Its
+generated credentials are for local demonstration only and must not be reused
+for tests or production. This is not yet a production deployment: separate test
+and production configurations, managed credentials, backup/restore, and
+upgrade procedures remain future work. The server already accepts explicit
+listener, database, web-root, and certificate paths, keeping those deployment
+environments separable from the demo configuration.
+
 ## Tests
 
 Catch2 v3 unit and gRPC integration tests are available through CTest. The
