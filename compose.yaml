@@ -1,0 +1,79 @@
+services:
+  demo-certificates:
+    image: measure:demo
+    entrypoint: ["/usr/local/bin/generate-demo-certs"]
+    user: "0:0"
+    volumes:
+      - demo-server-certificates:/run/measure/demo-certificates/server
+      - demo-device-certificates:/run/measure/demo-certificates/device
+      - demo-operator-certificates:/run/measure/demo-certificates/operator
+
+  measure-server:
+    image: measure:demo
+    build: .
+    depends_on:
+      demo-certificates:
+        condition: service_completed_successfully
+    command:
+      - --port=50051
+      - --http_port=8080
+      - --http_bind_address=0.0.0.0
+      - --database_path=/var/lib/measure/measure.db
+      - --web_root=/opt/measure/dashboard/dist
+      - --server_cert=/run/measure/certs/server.crt
+      - --server_key=/run/measure/certs/server.key
+      - --client_ca=/run/measure/certs/ca.crt
+    ports:
+      - "127.0.0.1:50051:50051"
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - measure-data:/var/lib/measure
+      - demo-server-certificates:/run/measure/certs:ro
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/measure_healthcheck
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  demo-device:
+    image: measure:demo
+    depends_on:
+      measure-server:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/measure_client"]
+    command:
+      - --target=measure-server:50051
+      - --client_id=demo-device
+      - --root_cert=/run/measure/certs/ca.crt
+      - --client_cert=/run/measure/certs/device.crt
+      - --client_key=/run/measure/certs/device.key
+    init: true
+    volumes:
+      - demo-device-certificates:/run/measure/certs:ro
+
+  demo-operator:
+    image: measure:demo
+    profiles: ["demo"]
+    depends_on:
+      measure-server:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/measure_client"]
+    command:
+      - --target=measure-server:50051
+      - --client_id=demo-operator
+      - --calibrate=true
+      - --duration=10
+      - --root_cert=/run/measure/certs/ca.crt
+      - --client_cert=/run/measure/certs/operator.crt
+      - --client_key=/run/measure/certs/operator.key
+    volumes:
+      - demo-operator-certificates:/run/measure/certs:ro
+
+volumes:
+  measure-data:
+  demo-server-certificates:
+  demo-device-certificates:
+  demo-operator-certificates:

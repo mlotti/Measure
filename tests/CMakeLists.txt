@@ -25,3 +25,20 @@ target_link_libraries(event_store_tests
     measure_service)
 
 add_test(NAME event_store_tests COMMAND event_store_tests)
+
+add_executable(dashboard_server_tests
+  dashboard_server_tests.cc
+  ../src/dashboard_server.cc)
+target_link_libraries(dashboard_server_tests
+  PRIVATE
+    Catch2::Catch2WithMain
+    measure_service)
+
+add_test(NAME dashboard_server_tests COMMAND dashboard_server_tests)
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME healthcheck_tests
+  COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/healthcheck_tests.py"
+    "$<TARGET_FILE:measure_healthcheck>")
+set_tests_properties(healthcheck_tests PROPERTIES TIMEOUT 30)

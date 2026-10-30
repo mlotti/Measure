@@ -39,7 +39,6 @@ add_library(m_grpc_proto
   ${m_proto_srcs}
   ${m_proto_hdrs})
 target_link_libraries(m_grpc_proto
-  absl::check
   ${_REFLECTION}
   ${_GRPC_GRPCPP}
   ${_PROTOBUF_LIBPROTOBUF})
@@ -70,10 +69,8 @@ foreach(_target
   target_compile_features(${_target} PRIVATE cxx_std_17)
   target_link_libraries(${_target}
     m_grpc_proto
-    absl::check
     absl::flags
     absl::flags_parse
-    absl::log
     ${_REFLECTION}
     ${_GRPC_GRPCPP}
     ${_PROTOBUF_LIBPROTOBUF})
@@ -81,6 +78,9 @@ endforeach()
 target_sources(measure_server PRIVATE src/dashboard_server.cc)
 target_link_libraries(measure_server measurement_utils measure_service)
 target_link_libraries(measure_client measure_client_runtime)
+
+add_executable(measure_healthcheck src/measure_healthcheck.cc)
+target_compile_features(measure_healthcheck PRIVATE cxx_std_17)
 
 option(BUILD_TESTING "Build Measure tests" OFF)
 if(BUILD_TESTING)

@@ -21,6 +21,8 @@ using grpc::ServerBuilder;
 
 ABSL_FLAG(uint16_t, port, 50051, "Server port for the service");
 ABSL_FLAG(uint16_t, http_port, 8080, "HTTP port for the localhost dashboard");
+ABSL_FLAG(std::string, http_bind_address, "127.0.0.1",
+          "IPv4 address for the dashboard listener");
 ABSL_FLAG(int, samples_retained, 500,
           "Maximum number of recent measurements retained by the dashboard");
 ABSL_FLAG(int, max_concurrent_measurements, 4,
@@ -51,12 +53,14 @@ std::string ReadFile(const std::string& path) {
 void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements,
                size_t max_concurrent_measurements,
                const std::string& database_path, int retention_days,
-               const std::string& web_root, const std::string& server_cert,
+               const std::string& web_root, const std::string& http_bind_address,
+               const std::string& server_cert,
                const std::string& server_key, const std::string& client_ca) {
   const std::string server_address = "0.0.0.0:" + std::to_string(port);
   MeasureServiceImpl service(max_measurements, database_path, retention_days,
                              max_concurrent_measurements);
-  DashboardServer dashboard_server(http_port, service, web_root);
+  DashboardServer dashboard_server(http_port, service, web_root,
+                                   http_bind_address);
 
   grpc::SslServerCredentialsOptions tls_options;
   tls_options.pem_root_certs = ReadFile(client_ca);
@@ -65,6 +69,7 @@ void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements,
   tls_options.client_certificate_request =
       GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
 
+  dashboard_server.Start();
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
   ServerBuilder builder;
@@ -72,8 +77,10 @@ void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements,
                            grpc::SslServerCredentials(tls_options));
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
+  if (!server) {
+    throw std::runtime_error("Failed to start gRPC server on " + server_address);
+  }
   std::cout << "Server listening on " << server_address << std::endl;
-  dashboard_server.Start();
 
   server->Wait();
   dashboard_server.Stop();
@@ -86,15 +93,21 @@ int main(int argc, char** argv) {
     std::cerr << "--max_concurrent_measurements must be positive." << std::endl;
     return 1;
   }
-  RunServer(absl::GetFlag(FLAGS_port), absl::GetFlag(FLAGS_http_port),
-            static_cast<size_t>(
-                std::max(1, absl::GetFlag(FLAGS_samples_retained))),
-            static_cast<size_t>(concurrency),
-            absl::GetFlag(FLAGS_database_path),
-            absl::GetFlag(FLAGS_retention_days),
-            absl::GetFlag(FLAGS_web_root),
-            absl::GetFlag(FLAGS_server_cert),
-            absl::GetFlag(FLAGS_server_key),
-            absl::GetFlag(FLAGS_client_ca));
+  try {
+    RunServer(absl::GetFlag(FLAGS_port), absl::GetFlag(FLAGS_http_port),
+              static_cast<size_t>(
+                  std::max(1, absl::GetFlag(FLAGS_samples_retained))),
+              static_cast<size_t>(concurrency),
+              absl::GetFlag(FLAGS_database_path),
+              absl::GetFlag(FLAGS_retention_days),
+              absl::GetFlag(FLAGS_web_root),
+              absl::GetFlag(FLAGS_http_bind_address),
+              absl::GetFlag(FLAGS_server_cert),
+              absl::GetFlag(FLAGS_server_key),
+              absl::GetFlag(FLAGS_client_ca));
+  } catch (const std::exception& error) {
+    std::cerr << "Server failed: " << error.what() << std::endl;
+    return 1;
+  }
   return 0;
 }
