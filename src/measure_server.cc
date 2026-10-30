@@ -69,6 +69,7 @@ void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements,
   tls_options.client_certificate_request =
       GRPC_SSL_REQUEST_AND_REQUIRE_CLIENT_CERTIFICATE_AND_VERIFY;
 
+  dashboard_server.Start();
   grpc::EnableDefaultHealthCheckService(true);
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
   ServerBuilder builder;
@@ -76,8 +77,10 @@ void RunServer(uint16_t port, uint16_t http_port, size_t max_measurements,
                            grpc::SslServerCredentials(tls_options));
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
+  if (!server) {
+    throw std::runtime_error("Failed to start gRPC server on " + server_address);
+  }
   std::cout << "Server listening on " << server_address << std::endl;
-  dashboard_server.Start();
 
   server->Wait();
   dashboard_server.Stop();
@@ -90,16 +93,21 @@ int main(int argc, char** argv) {
     std::cerr << "--max_concurrent_measurements must be positive." << std::endl;
     return 1;
   }
-  RunServer(absl::GetFlag(FLAGS_port), absl::GetFlag(FLAGS_http_port),
-            static_cast<size_t>(
-                std::max(1, absl::GetFlag(FLAGS_samples_retained))),
-            static_cast<size_t>(concurrency),
-            absl::GetFlag(FLAGS_database_path),
-            absl::GetFlag(FLAGS_retention_days),
-            absl::GetFlag(FLAGS_web_root),
-            absl::GetFlag(FLAGS_http_bind_address),
-            absl::GetFlag(FLAGS_server_cert),
-            absl::GetFlag(FLAGS_server_key),
-            absl::GetFlag(FLAGS_client_ca));
+  try {
+    RunServer(absl::GetFlag(FLAGS_port), absl::GetFlag(FLAGS_http_port),
+              static_cast<size_t>(
+                  std::max(1, absl::GetFlag(FLAGS_samples_retained))),
+              static_cast<size_t>(concurrency),
+              absl::GetFlag(FLAGS_database_path),
+              absl::GetFlag(FLAGS_retention_days),
+              absl::GetFlag(FLAGS_web_root),
+              absl::GetFlag(FLAGS_http_bind_address),
+              absl::GetFlag(FLAGS_server_cert),
+              absl::GetFlag(FLAGS_server_key),
+              absl::GetFlag(FLAGS_client_ca));
+  } catch (const std::exception& error) {
+    std::cerr << "Server failed: " << error.what() << std::endl;
+    return 1;
+  }
   return 0;
 }

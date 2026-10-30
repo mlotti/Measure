@@ -642,7 +642,46 @@ DashboardServer::DashboardServer(uint16_t port, MeasureServiceImpl& service,
 DashboardServer::~DashboardServer() { Stop(); }
 
 void DashboardServer::Start() {
-  if (!thread_.joinable()) thread_ = std::thread(&DashboardServer::Run, this);
+  if (thread_.joinable()) return;
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  if (inet_pton(AF_INET, bind_address_.c_str(), &address.sin_addr) != 1) {
+    throw std::invalid_argument("Invalid dashboard bind address: " +
+                                bind_address_);
+  }
+  address.sin_port = htons(port_);
+
+  const int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd < 0) {
+    throw std::runtime_error("Failed to create HTTP socket: " +
+                             std::string(std::strerror(errno)));
+  }
+  server_fd_.store(server_fd);
+  try {
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+      throw std::runtime_error("Failed to configure HTTP socket: " +
+                               std::string(std::strerror(errno)));
+    }
+    if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) <
+        0) {
+      throw std::runtime_error("Failed to bind dashboard server on " +
+                               bind_address_ + ":" + std::to_string(port_) +
+                               ": " + std::strerror(errno));
+    }
+    if (listen(server_fd, 16) < 0) {
+      throw std::runtime_error("Failed to listen on dashboard server: " +
+                               std::string(std::strerror(errno)));
+    }
+    stop_requested_.store(false);
+    thread_ = std::thread(&DashboardServer::Run, this);
+  } catch (...) {
+    CloseServerSocket();
+    throw;
+  }
+  std::cout << "Fleet dashboard available at http://" << bind_address_ << ":"
+            << port_ << std::endl;
 }
 
 void DashboardServer::Stop() {
@@ -660,41 +699,7 @@ void DashboardServer::CloseServerSocket() {
 }
 
 void DashboardServer::Run() {
-  const int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd < 0) {
-    std::cerr << "Failed to create HTTP socket" << std::endl;
-    return;
-  }
-  server_fd_.store(server_fd);
-
-  int opt = 1;
-  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  if (inet_pton(AF_INET, bind_address_.c_str(), &address.sin_addr) != 1) {
-    std::cerr << "Invalid dashboard bind address: " << bind_address_
-              << std::endl;
-    CloseServerSocket();
-    return;
-  }
-  address.sin_port = htons(port_);
-
-  if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) <
-      0) {
-    std::cerr << "Failed to bind dashboard server on " << bind_address_
-              << ":" << port_ << ": " << std::strerror(errno) << std::endl;
-    CloseServerSocket();
-    return;
-  }
-  if (listen(server_fd, 16) < 0) {
-    std::cerr << "Failed to listen on dashboard server: "
-              << std::strerror(errno) << std::endl;
-    CloseServerSocket();
-    return;
-  }
-
-  std::cout << "Fleet dashboard available at http://" << bind_address_ << ":"
-            << port_ << std::endl;
+  const int server_fd = server_fd_.load();
   while (!stop_requested_.load()) {
     const int client_fd = accept(server_fd, nullptr, nullptr);
     if (client_fd < 0) {

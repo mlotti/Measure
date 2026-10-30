@@ -103,6 +103,26 @@ new role-specific credentials without removing the measurement database.
 The old shared `demo-certificates` volume is no longer mounted and should be
 removed after stopping containers that still use it.
 
+Saved credentials are checked for expiry, trust, matching private keys, and
+expected demo identities before reuse. Invalid or incomplete credentials stop
+startup with an error; they are not silently replaced.
+To reset only the demo certificates **without deleting measurements**, stop the
+stack, remove the generated role credentials, and start again:
+
+```bash
+docker compose down
+docker compose run --rm --no-deps --entrypoint sh demo-certificates -c '
+  set -eu
+  for role in server device operator; do
+    directory="/run/measure/demo-certificates/$role"
+    rm -f "$directory/ca.crt" "$directory/$role.crt" "$directory/$role.key"
+  done
+'
+docker compose up --build
+```
+
+Do not use `down -v` for this recovery: that also deletes the measurement database.
+
 The demo publishes its dashboard and gRPC ports only on host loopback. Its
 health check uses a small native HTTP probe with a two-second deadline rather
 than curl, so the runtime image needs neither curl nor Debian's Brotli library.
@@ -128,6 +148,18 @@ tests when configuring:
 cmake -S . -B build -DBUILD_TESTING=ON -DGRPC_FETCHCONTENT=ON
 cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
+```
+
+The dashboard tests include invalid bind addresses, occupied ports, and listener
+restart. Address and bind failures terminate server startup with a nonzero exit.
+Demo credential regression tests run as root in the demo image (they create only
+temporary test credentials and do not mount the deployment's data volumes):
+
+```bash
+docker compose build
+docker run --rm --user 0:0 \
+  --mount type=bind,source="$(pwd)/tests",target=/tests,readonly \
+  --entrypoint sh measure:demo /tests/demo_credentials_tests.sh
 ```
 
 ## Run
