@@ -31,7 +31,6 @@ FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
-      curl \
       libgrpc++1.51 \
       libprotobuf32 \
       libsqlite3-0 \
@@ -41,8 +40,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /var/lib/measure /run/measure/certs \
     && chown -R measure:measure /var/lib/measure /run/measure
 
+RUN if dpkg-query -W -f='${binary:Package}\n' | grep -i brotli; then \
+      echo "Brotli packages must not be installed in the runtime image" >&2; \
+      exit 1; \
+    fi
+
 COPY --from=cpp-build /workspace/build/measure_server /usr/local/bin/
 COPY --from=cpp-build /workspace/build/measure_client /usr/local/bin/
+COPY --from=cpp-build /workspace/build/measure_healthcheck /usr/local/bin/
 COPY --from=dashboard-build /workspace/dashboard/dist /opt/measure/dashboard/dist
 COPY deployment/demo/generate-certs.sh /usr/local/bin/generate-demo-certs
 RUN chmod 0755 /usr/local/bin/generate-demo-certs

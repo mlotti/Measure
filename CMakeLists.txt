@@ -79,6 +79,9 @@ target_sources(measure_server PRIVATE src/dashboard_server.cc)
 target_link_libraries(measure_server measurement_utils measure_service)
 target_link_libraries(measure_client measure_client_runtime)
 
+add_executable(measure_healthcheck src/measure_healthcheck.cc)
+target_compile_features(measure_healthcheck PRIVATE cxx_std_17)
+
 option(BUILD_TESTING "Build Measure tests" OFF)
 if(BUILD_TESTING)
   include(FetchContent)

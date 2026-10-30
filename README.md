@@ -96,7 +96,12 @@ demo certificates in Docker-managed volumes. To remove those volumes and reset
 the demo, run `docker compose down -v`.
 
 The demo publishes its dashboard and gRPC ports only on host loopback. Its
-generated credentials are for local demonstration only and must not be reused
+health check uses a small native HTTP probe with a two-second deadline rather
+than curl, so the runtime image needs neither curl nor Debian's Brotli library.
+The image build rejects installed Brotli packages in the final runtime stage;
+this does not cover dependencies in the separate build stages.
+The probe checks the dashboard API on its demo port, 8080.
+The generated credentials are for local demonstration only and must not be reused
 for tests or production. This is not yet a production deployment: separate test
 and production configurations, managed credentials, backup/restore, and
 upgrade procedures remain future work. The server already accepts explicit
