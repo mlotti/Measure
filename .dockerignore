@@ -1,0 +1,10 @@
+.git
+.gitignore
+.dockerignore
+build
+cmake/build
+dashboard/node_modules
+dashboard/dist
+measure.db
+measure.db-shm
+measure.db-wal

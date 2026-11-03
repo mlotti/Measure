@@ -1,5 +1,23 @@
 # Measure
 
+## Quick start
+
+With Docker and Docker Compose installed, clone this repository and run the demo:
+
+```bash
+git clone https://github.com/mlotti/Measure.git
+cd Measure
+docker compose up --build
+```
+
+Open **http://127.0.0.1:8080/** to see a simulated device reporting measurements.
+Try changing its threshold or starting calibration in the dashboard.
+The first run builds the application and may take a few minutes; certificates
+and persistent storage are set up automatically.
+
+Press Ctrl+C to stop. This is a local demo, not a production deployment.
+See [demo deployment details](#quick-demo-deployment) for cleanup and reset commands.
+
 `Measure` is a small gRPC-based measurement system:
 - one server accepts measurements from multiple clients
 - each client can subscribe to server-pushed threshold commands
@@ -74,6 +92,68 @@ CMake generates the protobuf and gRPC sources as part of the build.
 
 The build also requires the SQLite3 development headers and library.
 
+## Quick demo deployment
+
+Docker Compose builds the server and dashboard, generates local demo-only
+certificates, starts a sample device, and persists the event database:
+
+```bash
+docker compose up --build
+```
+
+Open the dashboard at <http://127.0.0.1:8080/>. The sample device generates
+measurements automatically. To issue a ten-second calibration command from a
+second terminal:
+
+```bash
+docker compose run --rm demo-operator
+```
+
+Stop the demo with Ctrl+C or `docker compose down`; both leave the database and
+demo certificates in Docker-managed volumes. To remove those volumes and reset
+the demo, run `docker compose down -v`.
+
+Server, device, and operator credentials live in separate volumes. Only the
+certificate generator mounts all three; each runtime container mounts only its
+own credentials and the public CA certificate. The CA private key is temporary
+and is not persisted. Upgrading from the earlier shared-volume demo generates
+new role-specific credentials without removing the measurement database.
+The old shared `demo-certificates` volume is no longer mounted and should be
+removed after stopping containers that still use it.
+
+Saved credentials are checked for expiry, trust, matching private keys, and
+expected demo identities before reuse. Invalid or incomplete credentials stop
+startup with an error; they are not silently replaced.
+To reset only the demo certificates **without deleting measurements**, stop the
+stack, remove the generated role credentials, and start again:
+
+```bash
+docker compose down
+docker compose run --rm --no-deps --entrypoint sh demo-certificates -c '
+  set -eu
+  for role in server device operator; do
+    directory="/run/measure/demo-certificates/$role"
+    rm -f "$directory/ca.crt" "$directory/$role.crt" "$directory/$role.key"
+  done
+'
+docker compose up --build
+```
+
+Do not use `down -v` for this recovery: that also deletes the measurement database.
+
+The demo publishes its dashboard and gRPC ports only on host loopback. Its
+health check uses a small native HTTP probe with a two-second deadline rather
+than curl, so the runtime image needs neither curl nor Debian's Brotli library.
+The image build rejects installed Brotli packages in the final runtime stage;
+this does not cover dependencies in the separate build stages.
+The probe checks the dashboard API on its demo port, 8080.
+The generated credentials are for local demonstration only and must not be reused
+for tests or production. This is not yet a production deployment: separate test
+and production configurations, managed credentials, backup/restore, and
+upgrade procedures remain future work. The server already accepts explicit
+listener, database, web-root, and certificate paths, keeping those deployment
+environments separable from the demo configuration.
+
 ## Tests
 
 Catch2 v3 unit and gRPC integration tests are available through CTest. The
@@ -87,6 +167,40 @@ cmake -S . -B build -DBUILD_TESTING=ON -DGRPC_FETCHCONTENT=ON
 cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
 ```
+
+The dashboard tests include invalid bind addresses, occupied ports, and listener
+restart. Address and bind failures terminate server startup with a nonzero exit.
+Demo credential regression tests run as root in the demo image (they create only
+temporary test credentials and do not mount the deployment's data volumes):
+
+```bash
+docker compose build
+docker run --rm --user 0:0 \
+  --mount type=bind,source="$(pwd)/tests",target=/tests,readonly \
+  --entrypoint sh measure:demo /tests/demo_credentials_tests.sh
+```
+
+Health-probe tests cover successful and fragmented HTTP responses, invalid
+statuses, connection refusal, and the two-second timeout. They run through
+CTest and require Python 3 and a free local port 8080.
+The container test target runs all C++ and health-probe suites:
+
+```bash
+docker build --target cpp-tests -t measure:cpp-tests .
+```
+
+After building the demo image, run the Compose smoke test:
+
+```bash
+python3 tests/compose_smoke_tests.py
+```
+
+It uses a unique Compose project and temporary host port, checks device reporting,
+role-scoped read-only credentials, operator authorization, and persistence across
+container recreation, then removes only its own containers and volumes.
+The `Deployment tests` GitHub Actions workflow runs these checks and the credential
+regressions on pull requests and pushes to `main`. Docker Compose 2.24.4 or newer
+is required for the smoke test's port override.
 
 ## Run
 

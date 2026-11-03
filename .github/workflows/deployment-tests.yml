@@ -1,0 +1,28 @@
+name: Deployment tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Run C++ and health-probe regression tests
+        run: docker build --target cpp-tests --tag measure:cpp-tests .
+      - name: Build demo runtime
+        run: docker compose build
+      - name: Run credential regression tests
+        run: |
+          docker run --rm --user 0:0 \
+            --mount type=bind,source="$PWD/tests",target=/tests,readonly \
+            --entrypoint sh measure:demo /tests/demo_credentials_tests.sh
+      - name: Run Compose smoke tests
+        run: python3 tests/compose_smoke_tests.py
