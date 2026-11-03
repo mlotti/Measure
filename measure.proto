@@ -23,6 +23,8 @@ service Measure {
   rpc SetCalibrationMode (CalibrationRequest) returns (CalibrationResponse) {}
   // Acknowledge applying the latest desired state, not merely receiving bytes.
   rpc AcknowledgeCommand (CommandAcknowledgment) returns (CommandReceipt) {}
+  // Reports the device's actual position; supported by movement protocol v2.
+  rpc ReportPosition (PositionReport) returns (PositionReceipt) {}
 }
 
 // The request containing the measurement
@@ -45,11 +47,12 @@ message MeasurementReceipt {
 // Identifies a subscribing client.
 message ClientInfo {
   string client_id = 1;
-  // 0 is the legacy, unacknowledged stream; 1 supports latest-state delivery.
+  // 0 is the legacy, unacknowledged stream; 1 supports acknowledged threshold
+  // state; 2 additionally supports movement state and position reports.
   uint32 protocol_version = 2;
 }
 
-// Server-pushed command that sets the client's measurement threshold.
+// Server-pushed latest desired state for the client.
 message Command {
   int32 threshold = 1;
   Mode mode = 2;
@@ -58,7 +61,26 @@ message Command {
   uint32 protocol_version = 5;
   // Local fallback if calibration expires while disconnected.
   int32 normal_threshold = 6;
+  // Movement fields are defined for protocol version 2. A false value means
+  // the device should stop and retain its current position.
+  bool has_destination = 7;
+  double destination_x = 8;
+  double destination_y = 9;
+  // Coordinate units per second; must be finite and greater than zero when
+  // has_destination is true.
+  double movement_speed = 10;
 }
+
+// A device's actual coordinate in the bounded 0..100 world plane.
+message PositionReport {
+  string client_id = 1;
+  double x = 2;
+  double y = 3;
+  // Device report time in Unix milliseconds.
+  int64 timestamp_unix_ms = 4;
+}
+
+message PositionReceipt {}
 
 message CommandAcknowledgment {
   string client_id = 1;
