@@ -360,7 +360,17 @@ outbox; no exactly-once physical action guarantee is claimed.
 Unknown subscription versions are rejected with `FAILED_PRECONDITION`.
 Version 0 remains accepted for old clients, but does not provide application
 acknowledgments or automatic command retries, and old clients do not enforce
-calibration expiry while offline. New clients require version 1 responses.
+calibration expiry while offline. Current threshold-only clients require
+version 1 responses.
+
+Movement is defined as protocol version 2. It retains version 1 threshold,
+calibration, revision, and acknowledgment behavior, and adds destination state
+to `Command` plus the `ReportPosition` RPC. Clients that request versions 0 or
+1 continue to receive threshold-only behavior; version 2 is required to use
+movement fields and report coordinates. Protobuf fields are additive, but
+clients must not act on movement fields unless they negotiated version 2. The
+current server accepts versions 0 and 1; version 2 server support will be
+implemented with position and destination persistence.
 
 Existing measurement request fields and RPC names are unchanged. The old
 response's field 1 is reserved, so old protobuf clients can decode the new
@@ -369,6 +379,31 @@ remain accepted for legacy clients and cannot be deduplicated. Calibration
 duration 0 retains the legacy ten-second default; other durations must be
 between 1 and 3,600 seconds. SQLite adds the delivery and receipt tables on
 startup without discarding existing events.
+
+### 2D movement contract
+
+Positions and destinations use a bounded plane with `x` and `y` coordinates
+from 0 through 100. The origin `(0, 0)` is the lower-left corner, `x` increases
+to the right, and `y` increases upward. Coordinates and speed are finite
+floating-point values. A destination must be inside the plane, and movement
+speed is measured in coordinate units per second and must be greater than zero
+when a destination is active.
+
+A version 2 `Command` is a complete latest-desired-state snapshot. When
+`has_destination` is true, the device moves in a straight line toward
+`(destination_x, destination_y)` at no more than `movement_speed` units per
+second. It stops exactly at the destination without overshooting. When
+`has_destination` is false, movement stops and the device retains its current
+position. A newer command replaces the previous destination; obsolete
+destinations are not queued or replayed.
+
+`ReportPosition` reports the device's actual position, not an interpolated
+dashboard estimate. While moving, a device reports at least once per second
+and reports on arrival; it reports its current position before resuming after
+a reconnect. The server's latest stored position is the recovery baseline.
+On reconnect, the device resumes toward the latest desired destination from
+that position. The dashboard displays reported positions and distinguishes
+them from the desired destination.
 
 The dashboard data is available from:
 
