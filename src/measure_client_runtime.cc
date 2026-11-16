@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -43,6 +44,7 @@ MeasureClient::~MeasureClient() { Stop(); }
 void MeasureClient::Start() {
   subscription_thread_ = std::thread([this] { RunSubscription(); });
   measurement_thread_ = std::thread([this] { RunMeasurements(); });
+  movement_thread_ = std::thread([this] { RunMovement(); });
 }
 
 void MeasureClient::Stop() {
@@ -55,6 +57,7 @@ void MeasureClient::Stop() {
   cv_.notify_all();
   if (subscription_thread_.joinable()) subscription_thread_.join();
   if (measurement_thread_.joinable()) measurement_thread_.join();
+  if (movement_thread_.joinable()) movement_thread_.join();
 }
 
 int MeasureClient::GetThreshold() const {
@@ -89,6 +92,31 @@ bool MeasureClient::RecordMeasurement(int value) {
   measurement.set_measurement_id(session_id_ + std::to_string(++next_measurement_));
   pending_.push_back(std::move(measurement));
   cv_.notify_all();
+  return true;
+}
+
+bool MeasureClient::ReportPosition(double x, double y) {
+  if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 100 || y < 0 ||
+      y > 100) {
+    std::cerr << "Position must contain finite coordinates from 0 to 100."
+              << std::endl;
+    return false;
+  }
+  measure::PositionReport position;
+  position.set_client_id(client_id_);
+  position.set_x(x);
+  position.set_y(y);
+  position.set_timestamp_unix_ms(CurrentTimeMillis());
+  measure::PositionReceipt receipt;
+  grpc::ClientContext context;
+  context.set_deadline(std::chrono::system_clock::now() +
+                       std::chrono::seconds(2));
+  const auto status = stub_->ReportPosition(&context, position, &receipt);
+  if (!status.ok()) {
+    std::cerr << "Position report failed: " << status.error_message()
+              << std::endl;
+    return false;
+  }
   return true;
 }
 
@@ -143,17 +171,26 @@ void MeasureClient::RunSubscription() {
     }
     measure::ClientInfo info;
     info.set_client_id(client_id_);
-    info.set_protocol_version(1);
+    info.set_protocol_version(2);
     auto reader = stub_->Subscribe(&context, info);
     measure::Command command;
     while (reader->Read(&command)) {
       const bool calibration = command.mode() == measure::CALIBRATION;
-      if (command.protocol_version() != 1 || command.revision() <= 0 ||
+      const bool moving = command.has_destination();
+      if (command.protocol_version() != 2 || command.revision() <= 0 ||
           (command.mode() != measure::NORMAL && !calibration) ||
           command.threshold() < 0 || command.threshold() > 100000 ||
           command.normal_threshold() < 0 || command.normal_threshold() > 100000 ||
           (calibration ? command.expires_unix_ms() <= 0
-                       : command.expires_unix_ms() != 0)) {
+                       : command.expires_unix_ms() != 0) ||
+          (moving && (!std::isfinite(command.destination_x()) ||
+                      !std::isfinite(command.destination_y()) ||
+                      command.destination_x() < 0 ||
+                      command.destination_x() > 100 ||
+                      command.destination_y() < 0 ||
+                      command.destination_y() > 100 ||
+                      !std::isfinite(command.movement_speed()) ||
+                      command.movement_speed() <= 0))) {
         Fail("Unsupported or invalid command protocol; stopping client.");
         break;
       }
@@ -257,6 +294,49 @@ void MeasureClient::RunMeasurements() {
                 << status.error_message() << std::endl;
       if (!WaitBeforeRetry(backoff)) return;
       backoff = std::min(backoff * 2, std::chrono::milliseconds(5000));
+    }
+  }
+}
+
+void MeasureClient::RunMovement() {
+  double x = 0;
+  double y = 0;
+  auto last_update = std::chrono::steady_clock::now();
+  auto last_report = last_update - std::chrono::seconds(1);
+  while (true) {
+    measure::Command command;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      cv_.wait_for(lock, std::chrono::milliseconds(100),
+                   [this] { return stopping_ || failed_; });
+      if (stopping_ || failed_) return;
+      command = applied_command_;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed =
+        std::chrono::duration<double>(now - last_update).count();
+    last_update = now;
+    bool arrived = false;
+    if (command.revision() > 0 && command.has_destination()) {
+      const double dx = command.destination_x() - x;
+      const double dy = command.destination_y() - y;
+      const double distance = std::hypot(dx, dy);
+      const double step = command.movement_speed() * elapsed;
+      if (distance <= step) {
+        x = command.destination_x();
+        y = command.destination_y();
+        arrived = true;
+      } else if (distance > 0) {
+        x += dx * step / distance;
+        y += dy * step / distance;
+      } else {
+        arrived = true;
+      }
+    }
+    if (command.revision() > 0 &&
+        (arrived || now - last_report >= std::chrono::seconds(1))) {
+      if (ReportPosition(x, y)) last_report = now;
     }
   }
 }

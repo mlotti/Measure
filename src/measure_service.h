@@ -29,6 +29,8 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
   void RemoveSubscriber(const std::string& client_id, SubscribeReactor* reactor);
   std::vector<measure::StoredMeasurement> GetMeasurementsSnapshot() const;
   std::vector<measure::StoredMeasurement> GetLatestMeasurementsSnapshot() const;
+  std::vector<measure::StoredPosition> GetLatestPositionsSnapshot() const;
+  std::vector<measure::DesiredMovement> GetDesiredMovements() const;
   std::vector<measure::StoredEvent> GetEventsSnapshot(
       size_t limit, int64_t since_unix_ms = 0, int64_t until_unix_ms = 0,
       const std::string& client_id = "") const;
@@ -43,6 +45,9 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
   void StartCalibration(
       const std::string& client_id, int duration_seconds,
       const std::string& actor_identity = "localhost_dashboard");
+  void SetDestination(const std::string& client_id, double destination_x,
+                      double destination_y, double speed,
+                      const std::string& actor_identity = "localhost_dashboard");
 
  private:
   grpc::ServerUnaryReactor* RecordMeasurement(
@@ -59,9 +64,14 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
       grpc::CallbackServerContext* context,
       const measure::CommandAcknowledgment* request,
       measure::CommandReceipt* reply) override;
+  grpc::ServerUnaryReactor* ReportPosition(
+      grpc::CallbackServerContext* context,
+      const measure::PositionReport* request,
+      measure::PositionReceipt* reply) override;
 
   void PublishDesiredCommands(bool only_pending = false);
-  measure::Command MakeCommand(const std::string& client_id) const;
+  measure::Command MakeCommand(const std::string& client_id,
+                               uint32_t protocol_version) const;
   void RunDelivery();
   void RunIngestion();
 

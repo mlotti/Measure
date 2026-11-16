@@ -4,6 +4,8 @@
 #include <cerrno>
 #include <charconv>
 #include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -203,6 +205,17 @@ bool ParseInteger64(const std::map<std::string, std::string>& form,
          parsed.ptr == it->second.data() + it->second.size();
 }
 
+bool ParseDouble(const std::map<std::string, std::string>& form,
+                 const std::string& key, double* value) {
+  const auto it = form.find(key);
+  if (it == form.end() || it->second.empty()) return false;
+  char* end = nullptr;
+  errno = 0;
+  *value = std::strtod(it->second.c_str(), &end);
+  return errno != ERANGE && end == it->second.c_str() + it->second.size() &&
+         std::isfinite(*value);
+}
+
 bool ParseQuery(const std::string& path,
                std::map<std::string, std::string>* query) {
   const size_t query_start = path.find('?');
@@ -229,6 +242,8 @@ void SendApiError(int client_fd, const std::string& status,
 std::string BuildDashboardJson(const MeasureServiceImpl& service) {
   const auto measurements = service.GetMeasurementsSnapshot();
   const auto latest_measurements = service.GetLatestMeasurementsSnapshot();
+  const auto positions = service.GetLatestPositionsSnapshot();
+  const auto movements = service.GetDesiredMovements();
   const auto connected = service.GetConnectedClients();
   const auto deliveries = service.GetCommandDeliveries();
   std::set<std::string> client_ids(connected.begin(), connected.end());
@@ -241,6 +256,16 @@ std::string BuildDashboardJson(const MeasureServiceImpl& service) {
   for (const auto& measurement : latest_measurements) {
     client_ids.insert(measurement.client_id);
     latest[measurement.client_id] = measurement;
+  }
+  std::map<std::string, measure::StoredPosition> latest_position;
+  for (const auto& position : positions) {
+    client_ids.insert(position.client_id);
+    latest_position[position.client_id] = position;
+  }
+  std::map<std::string, measure::DesiredMovement> desired_movement;
+  for (const auto& movement : movements) {
+    client_ids.insert(movement.client_id);
+    desired_movement[movement.client_id] = movement;
   }
 
   std::string json =
@@ -259,6 +284,35 @@ std::string BuildDashboardJson(const MeasureServiceImpl& service) {
             "\",\"connected\":" + (is_connected ? "true" : "false") +
             ",\"latest_point\":";
     json += has_measurement ? std::to_string(measurement->second.point) : "null";
+    const auto position = latest_position.find(client_id);
+    json += ",\"position_x\":";
+    json += position == latest_position.end() ? "null"
+                                              : std::to_string(position->second.x);
+    json += ",\"position_y\":";
+    json += position == latest_position.end() ? "null"
+                                              : std::to_string(position->second.y);
+    json += ",\"position_timestamp_unix_ms\":" +
+            std::to_string(position == latest_position.end()
+                               ? 0
+                               : position->second.timestamp_unix_ms);
+    const auto movement = desired_movement.find(client_id);
+    json += ",\"has_destination\":";
+    json += movement != desired_movement.end() &&
+                    movement->second.has_destination
+                ? "true"
+                : "false";
+    json += ",\"destination_x\":";
+    json += movement == desired_movement.end()
+                ? "null"
+                : std::to_string(movement->second.destination_x);
+    json += ",\"destination_y\":";
+    json += movement == desired_movement.end()
+                ? "null"
+                : std::to_string(movement->second.destination_y);
+    json += ",\"movement_speed\":";
+    json += movement == desired_movement.end()
+                ? "null"
+                : std::to_string(movement->second.speed);
     const auto delivery = command_delivery.find(client_id);
     json += ",\"desired_revision\":\"" +
             std::to_string(delivery != command_delivery.end()
@@ -418,6 +472,33 @@ void HandlePost(int client_fd, const HttpRequest& request,
     service.SetThreshold(threshold);
     SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
                      "{\"message\":\"Latest fleet threshold saved; device "
+                     "application is acknowledged separately.\"}");
+    return;
+  }
+  if (request.path == "/api/destination") {
+    const auto target = form.find("client_id");
+    const std::string client_id = target == form.end() ? "" : target->second;
+    double destination_x = 0;
+    double destination_y = 0;
+    double speed = 0;
+    if (client_id.empty() || !ParseDouble(form, "destination_x", &destination_x) ||
+        !ParseDouble(form, "destination_y", &destination_y) ||
+        !ParseDouble(form, "speed", &speed) || destination_x < 0 ||
+        destination_x > 100 || destination_y < 0 || destination_y > 100 ||
+        speed <= 0) {
+      SendApiError(client_fd, "400 Bad Request",
+                   "A device ID, coordinates from 0 to 100, and a positive "
+                   "finite speed are required.");
+      return;
+    }
+    try {
+      service.SetDestination(client_id, destination_x, destination_y, speed);
+    } catch (const std::invalid_argument& error) {
+      SendApiError(client_fd, "400 Bad Request", error.what());
+      return;
+    }
+    SendHttpResponse(client_fd, "200 OK", "application/json; charset=utf-8",
+                     "{\"message\":\"Latest destination saved; device "
                      "application is acknowledged separately.\"}");
     return;
   }

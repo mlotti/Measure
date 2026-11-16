@@ -2,6 +2,7 @@
 #include "device_identity.h"
 
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <iostream>
 #include <optional>
@@ -31,9 +32,11 @@ std::string PeerIdentity(const grpc::ServerContextBase& context) {
 
 class SubscribeReactor : public grpc::ServerWriteReactor<Command> {
  public:
-  SubscribeReactor(std::string client_id, bool reliable,
+  SubscribeReactor(std::string client_id, uint32_t protocol_version,
                    MeasureServiceImpl* service)
-      : client_id_(std::move(client_id)), reliable_(reliable), service_(service) {
+      : client_id_(std::move(client_id)),
+        protocol_version_(protocol_version),
+        service_(service) {
     try {
       service_->AddSubscriber(client_id_, this);
     } catch (const std::exception& error) {
@@ -42,7 +45,8 @@ class SubscribeReactor : public grpc::ServerWriteReactor<Command> {
     }
   }
 
-  bool reliable() const { return reliable_; }
+  bool reliable() const { return protocol_version_ >= 1; }
+  uint32_t protocol_version() const { return protocol_version_; }
 
   void PushCommand(const Command& cmd) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -92,7 +96,7 @@ class SubscribeReactor : public grpc::ServerWriteReactor<Command> {
   }
 
   std::string client_id_;
-  bool reliable_;
+  uint32_t protocol_version_;
   MeasureServiceImpl* service_;
   std::mutex mu_;
   std::optional<Command> pending_;
@@ -167,7 +171,7 @@ void MeasureServiceImpl::RunIngestion() {
 }
 
 measure::Command MeasureServiceImpl::MakeCommand(
-    const std::string& client_id) const {
+    const std::string& client_id, uint32_t protocol_version) const {
   const auto desired = event_store_.GetDesiredCommand(client_id);
   Command command;
   command.set_threshold(desired.threshold);
@@ -175,8 +179,15 @@ measure::Command MeasureServiceImpl::MakeCommand(
                                                : measure::NORMAL);
   command.set_revision(desired.revision);
   command.set_expires_unix_ms(desired.expires_unix_ms);
-  command.set_protocol_version(1);
+  command.set_protocol_version(protocol_version);
   command.set_normal_threshold(event_store_.GetLatestThreshold(8));
+  if (protocol_version >= 2) {
+    const auto movement = event_store_.GetDesiredMovement(client_id);
+    command.set_has_destination(movement.has_destination);
+    command.set_destination_x(movement.destination_x);
+    command.set_destination_y(movement.destination_y);
+    command.set_movement_speed(movement.speed);
+  }
   return command;
 }
 
@@ -185,7 +196,7 @@ void MeasureServiceImpl::AddSubscriber(const std::string& client_id,
   std::lock_guard<std::mutex> lock(subscribers_mu_);
   event_store_.ExpireCalibrations(CurrentTimeMillis());
   event_store_.RegisterDevice(client_id);
-  const auto command = MakeCommand(client_id);
+  const auto command = MakeCommand(client_id, reactor->protocol_version());
   const auto old = subscribers_.find(client_id);
   if (old != subscribers_.end()) old->second->Stop();
   subscribers_[client_id] = reactor;
@@ -211,6 +222,16 @@ MeasureServiceImpl::GetMeasurementsSnapshot() const {
 std::vector<measure::StoredMeasurement>
 MeasureServiceImpl::GetLatestMeasurementsSnapshot() const {
   return event_store_.GetLatestMeasurements();
+}
+
+std::vector<measure::StoredPosition>
+MeasureServiceImpl::GetLatestPositionsSnapshot() const {
+  return event_store_.GetLatestPositions();
+}
+
+std::vector<measure::DesiredMovement> MeasureServiceImpl::GetDesiredMovements()
+    const {
+  return event_store_.GetDesiredMovements();
 }
 
 std::vector<measure::StoredEvent> MeasureServiceImpl::GetEventsSnapshot(
@@ -253,7 +274,8 @@ void MeasureServiceImpl::PublishDesiredCommands(bool only_pending) {
          delivery.desired_revision == delivery.acknowledged_revision)) {
       continue;
     }
-    it->second->PushCommand(MakeCommand(delivery.client_id));
+    it->second->PushCommand(
+        MakeCommand(delivery.client_id, it->second->protocol_version()));
   }
 }
 
@@ -344,13 +366,13 @@ grpc::ServerWriteReactor<Command>* MeasureServiceImpl::Subscribe(
         Status(grpc::StatusCode::UNAUTHENTICATED,
                "Device certificate does not match client_id."));
   }
-  if (request->protocol_version() > 1) {
+  if (request->protocol_version() > 2) {
     return new RejectedSubscribeReactor(
         Status(grpc::StatusCode::FAILED_PRECONDITION,
-               "Supported subscription protocol versions are 0 and 1."));
+               "Supported subscription protocol versions are 0, 1, and 2."));
   }
-  return new SubscribeReactor(request->client_id(),
-                               request->protocol_version() == 1, this);
+  return new SubscribeReactor(request->client_id(), request->protocol_version(),
+                               this);
 }
 
 grpc::ServerUnaryReactor* MeasureServiceImpl::AcknowledgeCommand(
@@ -374,6 +396,43 @@ grpc::ServerUnaryReactor* MeasureServiceImpl::AcknowledgeCommand(
     } else {
       reactor->Finish(Status::OK);
     }
+  } catch (const std::exception& error) {
+    reactor->Finish(Status(grpc::StatusCode::INTERNAL, error.what()));
+  }
+  return reactor;
+}
+
+grpc::ServerUnaryReactor* MeasureServiceImpl::ReportPosition(
+    grpc::CallbackServerContext* context,
+    const measure::PositionReport* request, measure::PositionReceipt*) {
+  auto* reactor = context->DefaultReactor();
+  if (!measure::IsDeviceIdentityForClient(PeerIdentity(*context),
+                                          request->client_id())) {
+    reactor->Finish(Status(grpc::StatusCode::UNAUTHENTICATED,
+                           "Device certificate does not match client_id."));
+    return reactor;
+  }
+  if (!std::isfinite(request->x()) || !std::isfinite(request->y()) ||
+      request->x() < 0 || request->x() > 100 || request->y() < 0 ||
+      request->y() > 100 || request->timestamp_unix_ms() <= 0) {
+    reactor->Finish(Status(grpc::StatusCode::INVALID_ARGUMENT,
+                           "Position coordinates must be finite values from 0 to 100 "
+                           "with a positive timestamp."));
+    return reactor;
+  }
+  try {
+    std::lock_guard<std::mutex> lock(subscribers_mu_);
+    const auto subscriber = subscribers_.find(request->client_id());
+    if (subscriber == subscribers_.end() ||
+        subscriber->second->protocol_version() < 2) {
+      reactor->Finish(Status(grpc::StatusCode::FAILED_PRECONDITION,
+                             "Position reports require protocol version 2."));
+      return reactor;
+    }
+    event_store_.RecordPosition(
+        {request->client_id(), request->x(), request->y(),
+         request->timestamp_unix_ms()});
+    reactor->Finish(Status::OK);
   } catch (const std::exception& error) {
     reactor->Finish(Status(grpc::StatusCode::INTERNAL, error.what()));
   }
@@ -425,5 +484,32 @@ void MeasureServiceImpl::StartCalibration(const std::string& client_id,
   event_store_.SetDesiredCalibration(
       clients, CurrentTimeMillis() + static_cast<int64_t>(duration) * 1000,
       actor_identity);
+  PublishDesiredCommands();
+}
+
+void MeasureServiceImpl::SetDestination(const std::string& client_id,
+                                        double destination_x,
+                                        double destination_y, double speed,
+                                        const std::string& actor_identity) {
+  if (client_id.empty()) {
+    throw std::invalid_argument("A destination requires a device ID.");
+  }
+  if (!std::isfinite(destination_x) || !std::isfinite(destination_y) ||
+      destination_x < 0 || destination_x > 100 || destination_y < 0 ||
+      destination_y > 100 || !std::isfinite(speed) || speed <= 0) {
+    throw std::invalid_argument(
+        "Destination coordinates must be finite values from 0 to 100 and "
+        "speed must be finite and positive.");
+  }
+  std::lock_guard<std::mutex> lock(subscribers_mu_);
+  const auto subscriber = subscribers_.find(client_id);
+  if (subscriber != subscribers_.end() &&
+      subscriber->second->protocol_version() < 2) {
+    throw std::invalid_argument(
+        "The connected device does not support movement protocol version 2.");
+  }
+  event_store_.RegisterDevice(client_id);
+  event_store_.SetDesiredMovement(client_id, true, destination_x, destination_y,
+                                  speed, actor_identity);
   PublishDesiredCommands();
 }

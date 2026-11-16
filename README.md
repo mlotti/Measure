@@ -369,8 +369,7 @@ to `Command` plus the `ReportPosition` RPC. Clients that request versions 0 or
 1 continue to receive threshold-only behavior; version 2 is required to use
 movement fields and report coordinates. Protobuf fields are additive, but
 clients must not act on movement fields unless they negotiated version 2. The
-current server accepts versions 0 and 1; version 2 server support will be
-implemented with position and destination persistence.
+server accepts protocol versions 0, 1, and 2.
 
 Existing measurement request fields and RPC names are unchanged. The old
 response's field 1 is reserved, so old protobuf clients can decode the new
@@ -415,6 +414,7 @@ GET  http://127.0.0.1:8080/api/export?format=csv
 GET  http://127.0.0.1:8080/api/export?format=json
 POST http://127.0.0.1:8080/api/threshold
 POST http://127.0.0.1:8080/api/calibration
+POST http://127.0.0.1:8080/api/destination
 ```
 
 History queries accept optional `since_ms`, `until_ms`, `client_id`, and
@@ -428,7 +428,12 @@ from the dashboard origin:
 ```text
 threshold=5
 client_id=client1&duration_seconds=10
+client_id=client1&destination_x=25&destination_y=75&speed=1.5
 ```
+
+The Control tab displays only the latest positions reported by devices; it
+does not estimate or animate unreported movement. Device markers are filled
+circles, while desired destinations are outlined diamonds.
 
 ## Data and behavior notes
 

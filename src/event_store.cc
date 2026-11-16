@@ -133,6 +133,15 @@ EventStore::EventStore(const std::string& path, int retention_days)
             "CREATE TABLE IF NOT EXISTS command_delivery ("
             "client_id TEXT PRIMARY KEY, acknowledged_revision INTEGER NOT NULL "
             "DEFAULT 0)");
+    Execute(database_,
+            "CREATE TABLE IF NOT EXISTS device_positions ("
+            "client_id TEXT PRIMARY KEY, x REAL NOT NULL, y REAL NOT NULL,"
+            "timestamp_unix_ms INTEGER NOT NULL)");
+    Execute(database_,
+            "CREATE TABLE IF NOT EXISTS desired_movements ("
+            "client_id TEXT PRIMARY KEY, has_destination INTEGER NOT NULL,"
+            "destination_x REAL NOT NULL, destination_y REAL NOT NULL,"
+            "speed REAL NOT NULL)");
     const int initial_threshold = GetLatestThreshold(8);
     Statement initial(database_,
                       "INSERT OR IGNORE INTO desired_commands VALUES('',1,?1,0)");
@@ -140,7 +149,7 @@ EventStore::EventStore(const std::string& path, int retention_days)
     initial.Step();
     Execute(database_,
             "INSERT OR IGNORE INTO settings VALUES('command_revision',1)");
-    Execute(database_, "PRAGMA user_version=2");
+    Execute(database_, "PRAGMA user_version=3");
     PruneExpiredEvents();
   } catch (...) {
     sqlite3_close(database_);
@@ -274,6 +283,27 @@ DesiredCommand EventStore::GetDesiredCommand(const std::string& client_id) const
   return ReadDesiredCommand(client_id);
 }
 
+DesiredMovement EventStore::ReadDesiredMovement(
+    const std::string& client_id) const {
+  Statement statement(database_,
+                      "SELECT has_destination,destination_x,destination_y,speed "
+                      "FROM desired_movements WHERE client_id=?1");
+  BindText(statement.get(), 1, client_id);
+  const int result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE) return {client_id, false, 0, 0, 0};
+  if (result != SQLITE_ROW) throw std::runtime_error(sqlite3_errmsg(database_));
+  return {client_id, sqlite3_column_int(statement.get(), 0) != 0,
+          sqlite3_column_double(statement.get(), 1),
+          sqlite3_column_double(statement.get(), 2),
+          sqlite3_column_double(statement.get(), 3)};
+}
+
+DesiredMovement EventStore::GetDesiredMovement(
+    const std::string& client_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return ReadDesiredMovement(client_id);
+}
+
 DesiredCommand EventStore::WriteDesiredCommand(const std::string& client_id,
                                                int threshold,
                                                int64_t expires_unix_ms) {
@@ -343,6 +373,54 @@ void EventStore::SetDesiredCalibration(const std::vector<std::string>& clients,
                       ",\"actor\":\"" + JsonEscape(actor) + "\"}",
                   std::nullopt, 0, "CALIBRATION");
     }
+    PruneExpiredEvents();
+    Execute(database_, "COMMIT");
+  } catch (...) {
+    sqlite3_exec(database_, "ROLLBACK", nullptr, nullptr, nullptr);
+    throw;
+  }
+}
+
+void EventStore::RecordPosition(const StoredPosition& position) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Statement statement(
+      database_,
+      "INSERT INTO device_positions VALUES(?1,?2,?3,?4) "
+      "ON CONFLICT(client_id) DO UPDATE SET x=excluded.x,y=excluded.y,"
+      "timestamp_unix_ms=excluded.timestamp_unix_ms "
+      "WHERE excluded.timestamp_unix_ms>=device_positions.timestamp_unix_ms");
+  BindText(statement.get(), 1, position.client_id);
+  statement.Check(sqlite3_bind_double(statement.get(), 2, position.x));
+  statement.Check(sqlite3_bind_double(statement.get(), 3, position.y));
+  statement.Check(sqlite3_bind_int64(statement.get(), 4,
+                                     position.timestamp_unix_ms));
+  statement.Step();
+}
+
+void EventStore::SetDesiredMovement(const std::string& client_id,
+                                    bool has_destination, double destination_x,
+                                    double destination_y, double speed,
+                                    const std::string& actor) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Execute(database_, "BEGIN IMMEDIATE");
+  try {
+    const auto desired = ReadDesiredCommand(client_id);
+    const auto command =
+        WriteDesiredCommand(client_id, desired.threshold, desired.expires_unix_ms);
+    Statement statement(
+        database_,
+        "INSERT OR REPLACE INTO desired_movements VALUES(?1,?2,?3,?4,?5)");
+    BindText(statement.get(), 1, client_id);
+    statement.Check(sqlite3_bind_int(statement.get(), 2, has_destination ? 1 : 0));
+    statement.Check(sqlite3_bind_double(statement.get(), 3, destination_x));
+    statement.Check(sqlite3_bind_double(statement.get(), 4, destination_y));
+    statement.Check(sqlite3_bind_double(statement.get(), 5, speed));
+    statement.Step();
+    InsertEvent("destination", CurrentTimeMillis(), client_id,
+                "{\"action\":\"destination_updated\",\"revision\":" +
+                    std::to_string(command.revision) + ",\"actor\":\"" +
+                    JsonEscape(actor) + "\"}",
+                std::nullopt, std::nullopt, "");
     PruneExpiredEvents();
     Execute(database_, "COMMIT");
   } catch (...) {
@@ -488,6 +566,42 @@ std::vector<StoredMeasurement> EventStore::GetLatestMeasurements() const {
     throw std::runtime_error(sqlite3_errmsg(database_));
   }
   return measurements;
+}
+
+std::vector<StoredPosition> EventStore::GetLatestPositions() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Statement statement(
+      database_, "SELECT client_id,x,y,timestamp_unix_ms FROM device_positions "
+                 "ORDER BY client_id");
+  std::vector<StoredPosition> positions;
+  int result = SQLITE_OK;
+  while ((result = sqlite3_step(statement.get())) == SQLITE_ROW) {
+    positions.push_back({ColumnText(statement.get(), 0),
+                         sqlite3_column_double(statement.get(), 1),
+                         sqlite3_column_double(statement.get(), 2),
+                         sqlite3_column_int64(statement.get(), 3)});
+  }
+  if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(database_));
+  return positions;
+}
+
+std::vector<DesiredMovement> EventStore::GetDesiredMovements() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  Statement statement(
+      database_,
+      "SELECT client_id,has_destination,destination_x,destination_y,speed "
+      "FROM desired_movements ORDER BY client_id");
+  std::vector<DesiredMovement> movements;
+  int result = SQLITE_OK;
+  while ((result = sqlite3_step(statement.get())) == SQLITE_ROW) {
+    movements.push_back({ColumnText(statement.get(), 0),
+                         sqlite3_column_int(statement.get(), 1) != 0,
+                         sqlite3_column_double(statement.get(), 2),
+                         sqlite3_column_double(statement.get(), 3),
+                         sqlite3_column_double(statement.get(), 4)});
+  }
+  if (result != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(database_));
+  return movements;
 }
 
 std::vector<StoredEvent> EventStore::GetEvents(size_t limit,
