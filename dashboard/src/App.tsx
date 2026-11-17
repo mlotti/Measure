@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
 import './App.css'
 
 type Device = {
@@ -177,6 +177,50 @@ function Chart({ events }: { events: Event[] }) {
   )
 }
 
+function MovementPlane({ devices, selectedDevice, onDestination }: {
+  devices: Device[]
+  selectedDevice: Device | undefined
+  onDestination: (x: number, y: number) => void
+}) {
+  const chooseDestination = (event: MouseEvent<SVGSVGElement>) => {
+    if (!selectedDevice) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const x = Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100))
+    const y = Math.max(0, Math.min(100, 100 - ((event.clientY - bounds.top) / bounds.height) * 100))
+    onDestination(x, y)
+  }
+
+  return (
+    <div className="movement-plane-wrap">
+      <svg className="movement-plane" viewBox="0 0 100 100" role="img"
+        aria-label="Device movement coordinate plane" onClick={chooseDestination}>
+        {[0, 25, 50, 75, 100].map(value => (
+          <g key={value}>
+            <line x1={value} x2={value} y1="0" y2="100" className="movement-grid" />
+            <line x1="0" x2="100" y1={value} y2={value} className="movement-grid" />
+          </g>
+        ))}
+        {devices.filter(device => device.has_destination && device.destination_x !== null &&
+          device.destination_y !== null).map(device => (
+            <rect key={`target-${device.client_id}`} className="movement-target"
+              x={device.destination_x! - 1.8} y={100 - device.destination_y! - 1.8}
+              width="3.6" height="3.6" transform={`rotate(45 ${device.destination_x} ${100 - device.destination_y!})`} />
+          ))}
+        {devices.filter(device => device.position_x !== null && device.position_y !== null).map(device => (
+          <g key={device.client_id}>
+            <circle className={`movement-device${device.connected ? '' : ' offline'}`}
+              cx={device.position_x!} cy={100 - device.position_y!} r="2.4" />
+            <text className="movement-label" x={device.position_x! + 3}
+              y={100 - device.position_y! - 3}>{device.client_id}</text>
+          </g>
+        ))}
+      </svg>
+      <div className="movement-axis movement-axis-y">Y 100 ↑</div>
+      <div className="movement-axis movement-axis-x">X 100 →</div>
+    </div>
+  )
+}
+
 function App() {
   const [data, setData] = useState<DashboardData>({ threshold: 8, devices: [], events: [] })
   const [history, setHistory] = useState<HistoryEvent[]>([])
@@ -190,6 +234,7 @@ function App() {
   const [destinationX, setDestinationX] = useState('0')
   const [destinationY, setDestinationY] = useState('0')
   const [speed, setSpeed] = useState('1')
+  const [activeTab, setActiveTab] = useState<'fleet' | 'control'>('fleet')
   const [dragged, setDragged] = useState<string | null>(null)
   const [now, setNow] = useState<number | null>(null)
 
@@ -274,6 +319,7 @@ function App() {
   }
 
   const connected = data.devices.filter(device => device.connected).length
+  const selectedDevice = data.devices.find(device => device.client_id === target)
   const chartEvents = history
     .filter(item => item.event_type === 'measurement' && item.point !== null)
     .map(item => ({
@@ -429,21 +475,71 @@ function App() {
       <header className="topbar">
         <button className="menu-button" aria-label="Open navigation">☰</button>
         <div className="brand"><strong>Measure</strong><span>Online</span></div>
-        <nav className="breadcrumbs" aria-label="Dashboard navigation">
-          <span>▦　Fleet</span><b>›</b><span>▱　Devices</span><b>›</b><span>⌁　Activity</span><b>›</b><span>⚙　Operations</span>
+        <nav className="dashboard-tabs" aria-label="Dashboard navigation">
+          <button className={activeTab === 'fleet' ? 'active' : ''} onClick={() => setActiveTab('fleet')}>Fleet</button>
+          <button className={activeTab === 'control' ? 'active' : ''} onClick={() => setActiveTab('control')}>Control</button>
         </nav>
         <div className="clock">        <strong>◷　{now ? new Date(now).toLocaleTimeString([], { timeZone: 'UTC', timeZoneName: 'short' }) : '— UTC'}</strong>
         <span>{now ? new Date(now).toLocaleTimeString() : '— Local'}</span></div>
         <button className="more-button" aria-label="More options">⋮</button>
       </header>
-      <main className="dashboard-layout">
-        <div className="dashboard-column left-column" onDragOver={event => event.preventDefault()}>
-          {layout.left.map(renderPanel)}
-        </div>
-        <div className="dashboard-column right-column" onDragOver={event => event.preventDefault()}>
-          {layout.right.map(renderPanel)}
-        </div>
-      </main>
+      {activeTab === 'fleet' ? (
+        <main className="dashboard-layout">
+          <div className="dashboard-column left-column" onDragOver={event => event.preventDefault()}>
+            {layout.left.map(renderPanel)}
+          </div>
+          <div className="dashboard-column right-column" onDragOver={event => event.preventDefault()}>
+            {layout.right.map(renderPanel)}
+          </div>
+        </main>
+      ) : (
+        <main className="control-layout">
+          <section className="panel control-panel">
+            <div className="panel-title"><span>Movement Control</span></div>
+            <form className="panel-form" onSubmit={event => {
+              event.preventDefault()
+              void submit('/api/destination', {
+                client_id: target,
+                destination_x: destinationX,
+                destination_y: destinationY,
+                speed,
+              })
+            }}>
+              <label>Device<select required value={target} onChange={event => setTarget(event.target.value)}>
+                <option value="" disabled>Select a device</option>
+                {data.devices.map(device => <option key={device.client_id} value={device.client_id}>
+                  {device.client_id}{device.connected ? '' : ' (offline)'}
+                </option>)}
+              </select></label>
+              <label>X<input type="number" min="0" max="100" step="any" required value={destinationX} onChange={event => setDestinationX(event.target.value)} /></label>
+              <label>Y<input type="number" min="0" max="100" step="any" required value={destinationY} onChange={event => setDestinationY(event.target.value)} /></label>
+              <label>Speed<input type="number" min="0.000001" step="any" required value={speed} onChange={event => setSpeed(event.target.value)} /></label>
+              <button type="submit" disabled={!selectedDevice}>Set destination</button>
+            </form>
+            {!data.devices.length && <div className="empty">No devices are available to control.</div>}
+            {selectedDevice && !selectedDevice.connected && <div className="notice">This device is offline. The destination will be delivered when it reconnects.</div>}
+            {notice && <div className="notice" role="status">{notice}</div>}
+          </section>
+          <section className="panel control-map">
+            <div className="panel-title"><span>Reported movement</span></div>
+            <MovementPlane devices={data.devices} selectedDevice={selectedDevice} onDestination={(x, y) => {
+              const destination_x = x.toFixed(2)
+              const destination_y = y.toFixed(2)
+              setDestinationX(destination_x)
+              setDestinationY(destination_y)
+              void submit('/api/destination', {
+                client_id: target,
+                destination_x,
+                destination_y,
+                speed,
+              })
+            }} />
+            <div className="movement-legend"><span><i className="movement-device-key" />Reported position</span><span><i className="movement-target-key" />Desired destination</span></div>
+            {!selectedDevice && <div className="empty">Select a device, then click the plane to choose a destination.</div>}
+            {selectedDevice && selectedDevice.position_x === null && <div className="empty">This device has not reported a position yet.</div>}
+          </section>
+        </main>
+      )}
     </div>
   )
 }

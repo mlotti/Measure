@@ -287,8 +287,6 @@ void MeasureClient::RunMovement() {
   auto last_update = std::chrono::steady_clock::now();
   auto next_report = last_update;
   while (true) {
-    double report_x = 0;
-    double report_y = 0;
     bool report = false;
     {
       std::unique_lock<std::mutex> lock(mu_);

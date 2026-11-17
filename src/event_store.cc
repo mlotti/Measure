@@ -283,7 +283,8 @@ DesiredCommand EventStore::GetDesiredCommand(const std::string& client_id) const
   return ReadDesiredCommand(client_id);
 }
 
-DesiredMovement EventStore::ReadDesiredMovement(const std::string& client_id) const {
+DesiredMovement EventStore::ReadDesiredMovement(
+    const std::string& client_id) const {
   Statement statement(database_,
                       "SELECT has_destination,destination_x,destination_y,speed "
                       "FROM desired_movements WHERE client_id=?1");
@@ -297,7 +298,8 @@ DesiredMovement EventStore::ReadDesiredMovement(const std::string& client_id) co
           sqlite3_column_double(statement.get(), 3)};
 }
 
-DesiredMovement EventStore::GetDesiredMovement(const std::string& client_id) const {
+DesiredMovement EventStore::GetDesiredMovement(
+    const std::string& client_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   return ReadDesiredMovement(client_id);
 }
@@ -390,7 +392,8 @@ void EventStore::RecordPosition(const StoredPosition& position) {
   BindText(statement.get(), 1, position.client_id);
   statement.Check(sqlite3_bind_double(statement.get(), 2, position.x));
   statement.Check(sqlite3_bind_double(statement.get(), 3, position.y));
-  statement.Check(sqlite3_bind_int64(statement.get(), 4, position.timestamp_unix_ms));
+  statement.Check(sqlite3_bind_int64(statement.get(), 4,
+                                     position.timestamp_unix_ms));
   statement.Step();
 }
 
@@ -416,7 +419,7 @@ void EventStore::SetDesiredMovement(const std::string& client_id,
     InsertEvent("destination", CurrentTimeMillis(), client_id,
                 "{\"action\":\"destination_updated\",\"revision\":" +
                     std::to_string(command.revision) + ",\"actor\":\"" +
-                    JsonEscape(actor) + "}",
+                    JsonEscape(actor) + "\"}",
                 std::nullopt, std::nullopt, "");
     PruneExpiredEvents();
     Execute(database_, "COMMIT");

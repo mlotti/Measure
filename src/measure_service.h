@@ -65,7 +65,8 @@ class MeasureServiceImpl final : public measure::Measure::CallbackService {
       const measure::CommandAcknowledgment* request,
       measure::CommandReceipt* reply) override;
   grpc::ServerUnaryReactor* ReportPosition(
-      grpc::CallbackServerContext* context, const measure::PositionReport* request,
+      grpc::CallbackServerContext* context,
+      const measure::PositionReport* request,
       measure::PositionReceipt* reply) override;
 
   void PublishDesiredCommands(bool only_pending = false);

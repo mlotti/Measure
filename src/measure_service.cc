@@ -229,7 +229,8 @@ MeasureServiceImpl::GetLatestPositionsSnapshot() const {
   return event_store_.GetLatestPositions();
 }
 
-std::vector<measure::DesiredMovement> MeasureServiceImpl::GetDesiredMovements() const {
+std::vector<measure::DesiredMovement> MeasureServiceImpl::GetDesiredMovements()
+    const {
   return event_store_.GetDesiredMovements();
 }
 
@@ -402,8 +403,8 @@ grpc::ServerUnaryReactor* MeasureServiceImpl::AcknowledgeCommand(
 }
 
 grpc::ServerUnaryReactor* MeasureServiceImpl::ReportPosition(
-    grpc::CallbackServerContext* context, const measure::PositionReport* request,
-    measure::PositionReceipt*) {
+    grpc::CallbackServerContext* context,
+    const measure::PositionReport* request, measure::PositionReceipt*) {
   auto* reactor = context->DefaultReactor();
   if (!measure::IsDeviceIdentityForClient(PeerIdentity(*context),
                                           request->client_id())) {
@@ -501,6 +502,12 @@ void MeasureServiceImpl::SetDestination(const std::string& client_id,
         "speed must be finite and positive.");
   }
   std::lock_guard<std::mutex> lock(subscribers_mu_);
+  const auto subscriber = subscribers_.find(client_id);
+  if (subscriber != subscribers_.end() &&
+      subscriber->second->protocol_version() < 2) {
+    throw std::invalid_argument(
+        "The connected device does not support movement protocol version 2.");
+  }
   event_store_.RegisterDevice(client_id);
   event_store_.SetDesiredMovement(client_id, true, destination_x, destination_y,
                                   speed, actor_identity);

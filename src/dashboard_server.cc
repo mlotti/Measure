@@ -302,14 +302,17 @@ std::string BuildDashboardJson(const MeasureServiceImpl& service) {
                 ? "true"
                 : "false";
     json += ",\"destination_x\":";
-    json += movement == desired_movement.end() ? "null"
-                                               : std::to_string(movement->second.destination_x);
+    json += movement == desired_movement.end()
+                ? "null"
+                : std::to_string(movement->second.destination_x);
     json += ",\"destination_y\":";
-    json += movement == desired_movement.end() ? "null"
-                                               : std::to_string(movement->second.destination_y);
+    json += movement == desired_movement.end()
+                ? "null"
+                : std::to_string(movement->second.destination_y);
     json += ",\"movement_speed\":";
-    json += movement == desired_movement.end() ? "null"
-                                               : std::to_string(movement->second.speed);
+    json += movement == desired_movement.end()
+                ? "null"
+                : std::to_string(movement->second.speed);
     const auto delivery = command_delivery.find(client_id);
     json += ",\"desired_revision\":\"" +
             std::to_string(delivery != command_delivery.end()
