@@ -140,6 +140,21 @@ class MovementTestService final : public measure::Measure::Service {
     return positions_;
   }
 
+  std::vector<std::chrono::steady_clock::time_point> PositionAttempts() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return position_attempts_;
+  }
+
+  void FailNextPositionReports(size_t count) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failed_position_reports_ = count;
+  }
+
+  void SetPositionReportDelay(std::chrono::milliseconds delay) {
+    std::lock_guard<std::mutex> lock(mu_);
+    position_report_delay_ = delay;
+  }
+
   bool Measured(int value) const {
     std::lock_guard<std::mutex> lock(mu_);
     return std::find(measurements_.begin(), measurements_.end(), value) !=
@@ -186,9 +201,30 @@ class MovementTestService final : public measure::Measure::Service {
   grpc::Status ReportPosition(grpc::ServerContext*,
                               const measure::PositionReport* position,
                               measure::PositionReceipt*) override {
-    std::lock_guard<std::mutex> lock(mu_);
-    positions_.push_back(*position);
-    cv_.notify_all();
+    bool fail = false;
+    std::chrono::milliseconds delay{0};
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      position_attempts_.push_back(std::chrono::steady_clock::now());
+      if (failed_position_reports_ > 0) {
+        --failed_position_reports_;
+        fail = true;
+      }
+      delay = position_report_delay_;
+      cv_.notify_all();
+    }
+    if (delay > std::chrono::milliseconds::zero()) {
+      std::this_thread::sleep_for(delay);
+    }
+    if (fail) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                          "Injected position report failure.");
+    }
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      positions_.push_back(*position);
+      cv_.notify_all();
+    }
     return grpc::Status::OK;
   }
 
@@ -204,7 +240,10 @@ class MovementTestService final : public measure::Measure::Service {
   uint32_t protocol_version_ = 0;
   std::deque<measure::Command> commands_;
   std::vector<measure::PositionReport> positions_;
+  std::vector<std::chrono::steady_clock::time_point> position_attempts_;
   std::vector<int> measurements_;
+  size_t failed_position_reports_ = 0;
+  std::chrono::milliseconds position_report_delay_{0};
 };
 
 std::unique_ptr<grpc::Server> StartMovementServer(MovementTestService& service,
@@ -316,6 +355,45 @@ TEST_CASE("movement client follows replacement destinations and reports position
 
   REQUIRE(client.RecordMeasurement(42));
   REQUIRE(Eventually([&] { return service.Measured(42); }));
+  client.Stop();
+  server->Shutdown();
+}
+
+TEST_CASE("position reporting retries, keeps stop position, and does not block movement") {
+  MovementTestService service;
+  service.FailNextPositionReports(1);
+  int port = 0;
+  auto server = StartMovementServer(service, &port);
+  REQUIRE(server != nullptr);
+
+  MeasureClient client(TestChannel(port, false), "sensor-1");
+  client.Start();
+  REQUIRE(Eventually([&] { return service.Subscribed(); }));
+  service.Send(MovementCommand(1, 100, 0, 10));
+
+  REQUIRE(Eventually([&] { return service.PositionAttempts().size() >= 2; }));
+  const auto retry_attempts = service.PositionAttempts();
+  REQUIRE(retry_attempts.size() >= 2);
+  CHECK(retry_attempts[1] - retry_attempts[0] >= std::chrono::milliseconds(900));
+  REQUIRE(Eventually([&] { return service.Positions().size() >= 1; }));
+
+  service.SetPositionReportDelay(std::chrono::milliseconds(1200));
+  REQUIRE(Eventually([&] { return service.PositionAttempts().size() >= 3; }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  measure::Command stop;
+  stop.set_threshold(8);
+  stop.set_normal_threshold(8);
+  stop.set_mode(measure::NORMAL);
+  stop.set_revision(2);
+  stop.set_protocol_version(2);
+  stop.set_has_destination(false);
+  service.Send(stop);
+
+  REQUIRE(Eventually([&] { return service.Positions().size() >= 3; },
+                     std::chrono::seconds(6)));
+  const auto positions = service.Positions();
+  CHECK(positions.back().x() > positions[positions.size() - 2].x() + 1);
+  CHECK(positions.back().y() == 0);
   client.Stop();
   server->Shutdown();
 }

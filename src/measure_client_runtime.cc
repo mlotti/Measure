@@ -44,6 +44,7 @@ MeasureClient::~MeasureClient() { Stop(); }
 void MeasureClient::Start() {
   subscription_thread_ = std::thread([this] { RunSubscription(); });
   measurement_thread_ = std::thread([this] { RunMeasurements(); });
+  position_report_thread_ = std::thread([this] { RunPositionReports(); });
   movement_thread_ = std::thread([this] { RunMovement(); });
 }
 
@@ -59,6 +60,7 @@ void MeasureClient::Stop() {
   if (subscription_thread_.joinable()) subscription_thread_.join();
   if (measurement_thread_.joinable()) measurement_thread_.join();
   if (movement_thread_.joinable()) movement_thread_.join();
+  if (position_report_thread_.joinable()) position_report_thread_.join();
 }
 
 int MeasureClient::GetThreshold() const {
@@ -219,9 +221,15 @@ void MeasureClient::RunSubscription() {
                     << " threshold=" << command.threshold() << std::endl;
         }
         if (movement_protocol) {
+          const bool reconnecting = !movement_enabled_;
           movement_enabled_ = true;
-          position_report_pending_ = command.has_destination();
-          position_retry_at_ = std::chrono::steady_clock::now();
+          if (reconnecting) {
+            position_sync_pending_ = true;
+            ++position_sync_generation_;
+          }
+          if (command.revision() == applied_command_.revision()) {
+            QueuePositionReportLocked(position_x_, position_y_);
+          }
         }
         cv_.notify_all();
         acknowledge = !calibration ||
@@ -300,10 +308,9 @@ void MeasureClient::RunMovement() {
       const auto& command = applied_command_;
       const bool commanded_to_move =
           movement_enabled_ && command.protocol_version() == 2 &&
-          command.has_destination();
-      const bool report_before_moving = position_report_pending_;
+          command.has_destination() && !position_sync_pending_;
       bool moving = false;
-      if (commanded_to_move && !report_before_moving) {
+      if (commanded_to_move) {
         const double dx = command.destination_x() - position_x_;
         const double dy = command.destination_y() - position_y_;
         const double distance = std::hypot(dx, dy);
@@ -320,20 +327,71 @@ void MeasureClient::RunMovement() {
         position_x_ = std::clamp(position_x_, 0.0, 100.0);
         position_y_ = std::clamp(position_y_, 0.0, 100.0);
       }
-      if (report_before_moving || (moving && now >= next_report)) {
-        report = true;
-        position_report_pending_ = false;
-      }
+      if (moving && now >= next_report) report = true;
       if (report) {
-        report_x = position_x_;
-        report_y = position_y_;
+        QueuePositionReportLocked(position_x_, position_y_);
         next_report = now + std::chrono::seconds(1);
       }
     }
-    if (report && !ReportPosition(report_x, report_y)) {
+  }
+}
+
+void MeasureClient::QueuePositionReportLocked(double x, double y) {
+  const bool was_pending = position_report_pending_;
+  pending_position_x_ = x;
+  pending_position_y_ = y;
+  pending_position_sync_generation_ =
+      position_sync_pending_ ? position_sync_generation_ : 0;
+  position_report_pending_ = true;
+  if (!was_pending) position_retry_at_ = std::chrono::steady_clock::now();
+  cv_.notify_all();
+}
+
+void MeasureClient::RunPositionReports() {
+  while (true) {
+    double x = 0;
+    double y = 0;
+    uint64_t sync_generation = 0;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      while (!stopping_ && !failed_) {
+        if (!position_report_pending_) {
+          cv_.wait(lock, [this] {
+            return stopping_ || failed_ || position_report_pending_;
+          });
+          continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < position_retry_at_) {
+          cv_.wait_until(lock, position_retry_at_);
+          continue;
+        }
+        x = pending_position_x_;
+        y = pending_position_y_;
+        sync_generation = pending_position_sync_generation_;
+        position_report_pending_ = false;
+        break;
+      }
+      if (stopping_ || failed_) return;
+    }
+
+    const bool reported = ReportPosition(x, y);
+    {
       std::lock_guard<std::mutex> lock(mu_);
-      if (!stopping_ && !failed_) {
-        position_report_pending_ = true;
+      if (stopping_ || failed_) return;
+      if (reported) {
+        if (position_sync_pending_ &&
+            sync_generation == position_sync_generation_) {
+          position_sync_pending_ = false;
+          cv_.notify_all();
+        }
+      } else {
+        if (!position_report_pending_) {
+          pending_position_x_ = x;
+          pending_position_y_ = y;
+          pending_position_sync_generation_ = sync_generation;
+          position_report_pending_ = true;
+        }
         position_retry_at_ = std::chrono::steady_clock::now() +
                              std::chrono::seconds(1);
       }
