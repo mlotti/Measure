@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <filesystem>
 #include <functional>
@@ -99,6 +102,158 @@ struct DatabaseWriteLock {
   }
 };
 
+measure::Command MovementCommand(int64_t revision, double x, double y,
+                                 double speed) {
+  measure::Command command;
+  command.set_threshold(8);
+  command.set_normal_threshold(8);
+  command.set_mode(measure::NORMAL);
+  command.set_revision(revision);
+  command.set_protocol_version(2);
+  command.set_has_destination(true);
+  command.set_destination_x(x);
+  command.set_destination_y(y);
+  command.set_movement_speed(speed);
+  return command;
+}
+
+class MovementTestService final : public measure::Measure::Service {
+ public:
+  void Send(measure::Command command) {
+    std::lock_guard<std::mutex> lock(mu_);
+    commands_.push_back(std::move(command));
+    cv_.notify_all();
+  }
+
+  bool Subscribed() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return subscribed_;
+  }
+
+  uint32_t ProtocolVersion() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return protocol_version_;
+  }
+
+  std::vector<measure::PositionReport> Positions() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return positions_;
+  }
+
+  std::vector<std::chrono::steady_clock::time_point> PositionAttempts() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return position_attempts_;
+  }
+
+  void FailNextPositionReports(size_t count) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failed_position_reports_ = count;
+  }
+
+  void SetPositionReportDelay(std::chrono::milliseconds delay) {
+    std::lock_guard<std::mutex> lock(mu_);
+    position_report_delay_ = delay;
+  }
+
+  bool Measured(int value) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return std::find(measurements_.begin(), measurements_.end(), value) !=
+           measurements_.end();
+  }
+
+ private:
+  grpc::Status Subscribe(grpc::ServerContext* context,
+                         const measure::ClientInfo* info,
+                         grpc::ServerWriter<measure::Command>* writer) override {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      subscribed_ = true;
+      protocol_version_ = info->protocol_version();
+      cv_.notify_all();
+    }
+    while (!context->IsCancelled()) {
+      measure::Command command;
+      {
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait_for(lock, std::chrono::milliseconds(20),
+                     [this, context] {
+                       return context->IsCancelled() || !commands_.empty();
+                     });
+        if (context->IsCancelled()) break;
+        if (commands_.empty()) continue;
+        command = std::move(commands_.front());
+        commands_.pop_front();
+      }
+      if (!writer->Write(command)) break;
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status RecordMeasurement(grpc::ServerContext*,
+                                 const measure::Measurement* measurement,
+                                 measure::MeasurementReceipt* receipt) override {
+    std::lock_guard<std::mutex> lock(mu_);
+    measurements_.push_back(measurement->point());
+    receipt->set_measurement_id(measurement->measurement_id());
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ReportPosition(grpc::ServerContext*,
+                              const measure::PositionReport* position,
+                              measure::PositionReceipt*) override {
+    bool fail = false;
+    std::chrono::milliseconds delay{0};
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      position_attempts_.push_back(std::chrono::steady_clock::now());
+      if (failed_position_reports_ > 0) {
+        --failed_position_reports_;
+        fail = true;
+      }
+      delay = position_report_delay_;
+      cv_.notify_all();
+    }
+    if (delay > std::chrono::milliseconds::zero()) {
+      std::this_thread::sleep_for(delay);
+    }
+    if (fail) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                          "Injected position report failure.");
+    }
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      positions_.push_back(*position);
+      cv_.notify_all();
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AcknowledgeCommand(grpc::ServerContext*,
+                                  const measure::CommandAcknowledgment*,
+                                  measure::CommandReceipt*) override {
+    return grpc::Status::OK;
+  }
+
+  mutable std::mutex mu_;
+  std::condition_variable cv_;
+  bool subscribed_ = false;
+  uint32_t protocol_version_ = 0;
+  std::deque<measure::Command> commands_;
+  std::vector<measure::PositionReport> positions_;
+  std::vector<std::chrono::steady_clock::time_point> position_attempts_;
+  std::vector<int> measurements_;
+  size_t failed_position_reports_ = 0;
+  std::chrono::milliseconds position_report_delay_{0};
+};
+
+std::unique_ptr<grpc::Server> StartMovementServer(MovementTestService& service,
+                                                  int* port) {
+  grpc::ServerBuilder builder;
+  builder.AddListeningPort("127.0.0.1:0", TestServerCredentials(), port);
+  builder.RegisterService(&service);
+  return builder.BuildAndStart();
+}
+
 }
 
 TEST_CASE("gRPC subscribers receive threshold and calibration commands") {
@@ -161,6 +316,85 @@ TEST_CASE("gRPC subscribers receive threshold and calibration commands") {
 
   subscription_context.TryCancel();
   reader->Finish();
+  server->Shutdown();
+}
+
+TEST_CASE("movement client follows replacement destinations and reports position") {
+  MovementTestService service;
+  int port = 0;
+  auto server = StartMovementServer(service, &port);
+  REQUIRE(server != nullptr);
+
+  MeasureClient client(TestChannel(port, false), "sensor-1");
+  client.Start();
+  REQUIRE(Eventually([&] { return service.Subscribed(); }));
+  CHECK(service.ProtocolVersion() == 2);
+
+  service.Send(MovementCommand(1, 10, 0, 5));
+  REQUIRE(Eventually([&] {
+    const auto positions = service.Positions();
+    return std::any_of(positions.begin(), positions.end(), [](const auto& position) {
+      return position.x() > 3 && position.x() < 7 && position.y() == 0;
+    });
+  }, std::chrono::seconds(3)));
+
+  service.Send(MovementCommand(2, 0, 10, 10));
+  REQUIRE(Eventually([&] {
+    const auto positions = service.Positions();
+    return std::any_of(positions.begin(), positions.end(), [](const auto& position) {
+      return position.y() > 1 && position.x() < 5;
+    });
+  }, std::chrono::seconds(3)));
+  REQUIRE(Eventually([&] {
+    const auto positions = service.Positions();
+    return std::any_of(positions.begin(), positions.end(), [](const auto& position) {
+      return std::abs(position.x()) < 0.0001 &&
+             std::abs(position.y() - 10) < 0.0001;
+    });
+  }, std::chrono::seconds(3)));
+
+  REQUIRE(client.RecordMeasurement(42));
+  REQUIRE(Eventually([&] { return service.Measured(42); }));
+  client.Stop();
+  server->Shutdown();
+}
+
+TEST_CASE("position reporting retries, keeps stop position, and does not block movement") {
+  MovementTestService service;
+  service.FailNextPositionReports(1);
+  int port = 0;
+  auto server = StartMovementServer(service, &port);
+  REQUIRE(server != nullptr);
+
+  MeasureClient client(TestChannel(port, false), "sensor-1");
+  client.Start();
+  REQUIRE(Eventually([&] { return service.Subscribed(); }));
+  service.Send(MovementCommand(1, 100, 0, 10));
+
+  REQUIRE(Eventually([&] { return service.PositionAttempts().size() >= 2; }));
+  const auto retry_attempts = service.PositionAttempts();
+  REQUIRE(retry_attempts.size() >= 2);
+  CHECK(retry_attempts[1] - retry_attempts[0] >= std::chrono::milliseconds(900));
+  REQUIRE(Eventually([&] { return service.Positions().size() >= 1; }));
+
+  service.SetPositionReportDelay(std::chrono::milliseconds(1200));
+  REQUIRE(Eventually([&] { return service.PositionAttempts().size() >= 3; }));
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  measure::Command stop;
+  stop.set_threshold(8);
+  stop.set_normal_threshold(8);
+  stop.set_mode(measure::NORMAL);
+  stop.set_revision(2);
+  stop.set_protocol_version(2);
+  stop.set_has_destination(false);
+  service.Send(stop);
+
+  REQUIRE(Eventually([&] { return service.Positions().size() >= 3; },
+                     std::chrono::seconds(6)));
+  const auto positions = service.Positions();
+  CHECK(positions.back().x() > positions[positions.size() - 2].x() + 1);
+  CHECK(positions.back().y() == 0);
+  client.Stop();
   server->Shutdown();
 }
 

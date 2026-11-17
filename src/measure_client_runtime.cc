@@ -44,6 +44,8 @@ MeasureClient::~MeasureClient() { Stop(); }
 void MeasureClient::Start() {
   subscription_thread_ = std::thread([this] { RunSubscription(); });
   measurement_thread_ = std::thread([this] { RunMeasurements(); });
+  position_report_thread_ = std::thread([this] { RunPositionReports(); });
+  movement_thread_ = std::thread([this] { RunMovement(); });
 }
 
 void MeasureClient::Stop() {
@@ -52,10 +54,13 @@ void MeasureClient::Stop() {
     stopping_ = true;
     if (subscription_context_) subscription_context_->TryCancel();
     if (measurement_context_) measurement_context_->TryCancel();
+    if (position_context_) position_context_->TryCancel();
   }
   cv_.notify_all();
   if (subscription_thread_.joinable()) subscription_thread_.join();
   if (measurement_thread_.joinable()) measurement_thread_.join();
+  if (movement_thread_.joinable()) movement_thread_.join();
+  if (position_report_thread_.joinable()) position_report_thread_.join();
 }
 
 int MeasureClient::GetThreshold() const {
@@ -109,7 +114,17 @@ bool MeasureClient::ReportPosition(double x, double y) {
   grpc::ClientContext context;
   context.set_deadline(std::chrono::system_clock::now() +
                        std::chrono::seconds(2));
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (stopping_ || failed_) return false;
+    position_context_ = &context;
+  }
   const auto status = stub_->ReportPosition(&context, position, &receipt);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    position_context_ = nullptr;
+    if (stopping_ || failed_) return false;
+  }
   if (!status.ok()) {
     std::cerr << "Position report failed: " << status.error_message()
               << std::endl;
@@ -142,6 +157,7 @@ void MeasureClient::Fail(const std::string& message) {
   failed_ = true;
   if (subscription_context_) subscription_context_->TryCancel();
   if (measurement_context_) measurement_context_->TryCancel();
+  if (position_context_) position_context_->TryCancel();
   cv_.notify_all();
 }
 
@@ -158,6 +174,7 @@ bool MeasureClient::WaitBeforeRetry(std::chrono::milliseconds delay) {
 
 void MeasureClient::RunSubscription() {
   auto backoff = std::chrono::milliseconds(100);
+  uint32_t protocol_version = 2;
   while (true) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() +
@@ -169,26 +186,26 @@ void MeasureClient::RunSubscription() {
     }
     measure::ClientInfo info;
     info.set_client_id(client_id_);
-    info.set_protocol_version(2);
+    info.set_protocol_version(protocol_version);
     auto reader = stub_->Subscribe(&context, info);
     measure::Command command;
     while (reader->Read(&command)) {
       const bool calibration = command.mode() == measure::CALIBRATION;
-      const bool moving = command.has_destination();
-      if (command.protocol_version() != 2 || command.revision() <= 0 ||
+      const bool movement_protocol = command.protocol_version() == 2;
+      if (command.protocol_version() != protocol_version ||
+          command.revision() <= 0 ||
           (command.mode() != measure::NORMAL && !calibration) ||
           command.threshold() < 0 || command.threshold() > 100000 ||
           command.normal_threshold() < 0 || command.normal_threshold() > 100000 ||
           (calibration ? command.expires_unix_ms() <= 0
                        : command.expires_unix_ms() != 0) ||
-          (moving && (!std::isfinite(command.destination_x()) ||
-                      !std::isfinite(command.destination_y()) ||
-                      command.destination_x() < 0 ||
-                      command.destination_x() > 100 ||
-                      command.destination_y() < 0 ||
-                      command.destination_y() > 100 ||
-                      !std::isfinite(command.movement_speed()) ||
-                      command.movement_speed() <= 0))) {
+          (movement_protocol && command.has_destination() &&
+           (!std::isfinite(command.destination_x()) ||
+            !std::isfinite(command.destination_y()) ||
+            !std::isfinite(command.movement_speed()) ||
+            command.destination_x() < 0 || command.destination_x() > 100 ||
+            command.destination_y() < 0 || command.destination_y() > 100 ||
+            command.movement_speed() <= 0))) {
         Fail("Unsupported or invalid command protocol; stopping client.");
         break;
       }
@@ -202,8 +219,19 @@ void MeasureClient::RunSubscription() {
           applied_command_ = command;
           std::cout << "Command applied: revision=" << command.revision()
                     << " threshold=" << command.threshold() << std::endl;
-          cv_.notify_all();
         }
+        if (movement_protocol) {
+          const bool reconnecting = !movement_enabled_;
+          movement_enabled_ = true;
+          if (reconnecting) {
+            position_sync_pending_ = true;
+            ++position_sync_generation_;
+          }
+          if (command.revision() == applied_command_.revision()) {
+            QueuePositionReportLocked(position_x_, position_y_);
+          }
+        }
+        cv_.notify_all();
         acknowledge = !calibration ||
                       command.expires_unix_ms() > CurrentTimeMillis();
       }
@@ -235,6 +263,14 @@ void MeasureClient::RunSubscription() {
       std::lock_guard<std::mutex> lock(mu_);
       subscription_context_ = nullptr;
       if (stopping_ || failed_) return;
+      movement_enabled_ = false;
+    }
+    if (protocol_version == 2 &&
+        status.error_code() == grpc::StatusCode::FAILED_PRECONDITION) {
+      std::cerr << "Movement protocol unavailable; using threshold-only protocol."
+                << std::endl;
+      protocol_version = 1;
+      continue;
     }
     if (!status.ok() && !IsRetryable(status)) {
       Fail("Subscription rejected: " + status.error_message());
@@ -244,6 +280,116 @@ void MeasureClient::RunSubscription() {
               << status.error_message() << std::endl;
     if (!WaitBeforeRetry(backoff)) return;
     backoff = std::min(backoff * 2, std::chrono::milliseconds(5000));
+  }
+}
+
+void MeasureClient::RunMovement() {
+  auto last_update = std::chrono::steady_clock::now();
+  auto next_report = last_update;
+  while (true) {
+    double report_x = 0;
+    double report_y = 0;
+    bool report = false;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      cv_.wait_for(lock, std::chrono::milliseconds(100));
+      if (stopping_ || failed_) return;
+
+      const auto now = std::chrono::steady_clock::now();
+      const auto elapsed =
+          std::chrono::duration<double>(now - last_update).count();
+      last_update = now;
+      const auto& command = applied_command_;
+      const bool commanded_to_move =
+          movement_enabled_ && command.protocol_version() == 2 &&
+          command.has_destination() && !position_sync_pending_;
+      bool moving = false;
+      if (commanded_to_move) {
+        const double dx = command.destination_x() - position_x_;
+        const double dy = command.destination_y() - position_y_;
+        const double distance = std::hypot(dx, dy);
+        const double step = command.movement_speed() * elapsed;
+        if (distance > 0 && distance <= step) {
+          position_x_ = command.destination_x();
+          position_y_ = command.destination_y();
+          report = true;
+        } else if (distance > 0) {
+          position_x_ += dx * step / distance;
+          position_y_ += dy * step / distance;
+          moving = true;
+        }
+        position_x_ = std::clamp(position_x_, 0.0, 100.0);
+        position_y_ = std::clamp(position_y_, 0.0, 100.0);
+      }
+      if (moving && now >= next_report) report = true;
+      if (report) {
+        QueuePositionReportLocked(position_x_, position_y_);
+        next_report = now + std::chrono::seconds(1);
+      }
+    }
+  }
+}
+
+void MeasureClient::QueuePositionReportLocked(double x, double y) {
+  const bool was_pending = position_report_pending_;
+  pending_position_x_ = x;
+  pending_position_y_ = y;
+  pending_position_sync_generation_ =
+      position_sync_pending_ ? position_sync_generation_ : 0;
+  position_report_pending_ = true;
+  if (!was_pending) position_retry_at_ = std::chrono::steady_clock::now();
+  cv_.notify_all();
+}
+
+void MeasureClient::RunPositionReports() {
+  while (true) {
+    double x = 0;
+    double y = 0;
+    uint64_t sync_generation = 0;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      while (!stopping_ && !failed_) {
+        if (!position_report_pending_) {
+          cv_.wait(lock, [this] {
+            return stopping_ || failed_ || position_report_pending_;
+          });
+          continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < position_retry_at_) {
+          cv_.wait_until(lock, position_retry_at_);
+          continue;
+        }
+        x = pending_position_x_;
+        y = pending_position_y_;
+        sync_generation = pending_position_sync_generation_;
+        position_report_pending_ = false;
+        break;
+      }
+      if (stopping_ || failed_) return;
+    }
+
+    const bool reported = ReportPosition(x, y);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (stopping_ || failed_) return;
+      if (reported) {
+        if (position_sync_pending_ &&
+            sync_generation == position_sync_generation_) {
+          position_sync_pending_ = false;
+          cv_.notify_all();
+        }
+      } else {
+        if (!position_report_pending_) {
+          pending_position_x_ = x;
+          pending_position_y_ = y;
+          pending_position_sync_generation_ = sync_generation;
+          position_report_pending_ = true;
+        }
+        position_retry_at_ = std::chrono::steady_clock::now() +
+                             std::chrono::seconds(1);
+      }
+    }
   }
 }
 

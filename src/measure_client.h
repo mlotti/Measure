@@ -34,6 +34,9 @@ class MeasureClient {
  private:
   void RunSubscription();
   void RunMeasurements();
+  void RunMovement();
+  void RunPositionReports();
+  void QueuePositionReportLocked(double x, double y);
   bool WaitBeforeRetry(std::chrono::milliseconds delay);
   void Fail(const std::string& message);
 
@@ -46,11 +49,24 @@ class MeasureClient {
   bool stopping_ = false;
   bool failed_ = false;
   measure::Command applied_command_;
+  double position_x_ = 0;
+  double position_y_ = 0;
+  bool position_report_pending_ = false;
+  double pending_position_x_ = 0;
+  double pending_position_y_ = 0;
+  std::chrono::steady_clock::time_point position_retry_at_{};
+  uint64_t position_sync_generation_ = 0;
+  uint64_t pending_position_sync_generation_ = 0;
+  bool position_sync_pending_ = false;
+  bool movement_enabled_ = false;
   std::deque<measure::Measurement> pending_;
   grpc::ClientContext* subscription_context_ = nullptr;
   grpc::ClientContext* measurement_context_ = nullptr;
+  grpc::ClientContext* position_context_ = nullptr;
   std::thread subscription_thread_;
   std::thread measurement_thread_;
+  std::thread movement_thread_;
+  std::thread position_report_thread_;
 };
 
 #endif
