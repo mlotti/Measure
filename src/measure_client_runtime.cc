@@ -382,49 +382,6 @@ void MeasureClient::RunMeasurements() {
   }
 }
 
-void MeasureClient::RunMovement() {
-  double x = 0;
-  double y = 0;
-  auto last_update = std::chrono::steady_clock::now();
-  auto last_report = last_update - std::chrono::seconds(1);
-  while (true) {
-    measure::Command command;
-    {
-      std::unique_lock<std::mutex> lock(mu_);
-      cv_.wait_for(lock, std::chrono::milliseconds(100),
-                   [this] { return stopping_ || failed_; });
-      if (stopping_ || failed_) return;
-      command = applied_command_;
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    const double elapsed =
-        std::chrono::duration<double>(now - last_update).count();
-    last_update = now;
-    bool arrived = false;
-    if (command.revision() > 0 && command.has_destination()) {
-      const double dx = command.destination_x() - x;
-      const double dy = command.destination_y() - y;
-      const double distance = std::hypot(dx, dy);
-      const double step = command.movement_speed() * elapsed;
-      if (distance <= step) {
-        x = command.destination_x();
-        y = command.destination_y();
-        arrived = true;
-      } else if (distance > 0) {
-        x += dx * step / distance;
-        y += dy * step / distance;
-      } else {
-        arrived = true;
-      }
-    }
-    if (command.revision() > 0 &&
-        (arrived || now - last_report >= std::chrono::seconds(1))) {
-      if (ReportPosition(x, y)) last_report = now;
-    }
-  }
-}
-
 bool MeasureClient::SetCalibrationMode(const std::string& target_client_id,
                                        int duration_seconds) {
   measure::CalibrationRequest request;
