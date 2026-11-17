@@ -108,6 +108,33 @@ TEST_CASE("latest desired state and acknowledgments survive restarts") {
   std::filesystem::remove(path.string() + "-shm");
 }
 
+TEST_CASE("latest positions and destinations survive restarts") {
+  const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("measure-movement-" + std::to_string(nonce) + ".db");
+  {
+    measure::EventStore store(path.string());
+    store.RecordPosition({"sensor-1", 10.5, 20.25, 1000});
+    store.RecordPosition({"sensor-1", 1, 2, 999});
+    store.SetDesiredMovement("sensor-1", true, 80, 90, 2.5, "tester");
+  }
+  {
+    measure::EventStore store(path.string());
+    const auto positions = store.GetLatestPositions();
+    REQUIRE(positions.size() == 1);
+    CHECK(positions.front().x == 10.5);
+    CHECK(positions.front().y == 20.25);
+    const auto movement = store.GetDesiredMovement("sensor-1");
+    CHECK(movement.has_destination);
+    CHECK(movement.destination_x == 80);
+    CHECK(movement.destination_y == 90);
+    CHECK(movement.speed == 2.5);
+  }
+  std::filesystem::remove(path);
+  std::filesystem::remove(path.string() + "-wal");
+  std::filesystem::remove(path.string() + "-shm");
+}
+
 TEST_CASE("measurement retries are deduplicated even after retention and restart") {
   const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
   const auto path = std::filesystem::temp_directory_path() /

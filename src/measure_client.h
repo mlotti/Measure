@@ -24,6 +24,7 @@ class MeasureClient {
   int GetThreshold() const;
   bool WaitForCommand(std::chrono::milliseconds timeout);
   bool RecordMeasurement(int value);
+  bool ReportPosition(double x, double y);
   bool WaitForMeasurements(std::chrono::milliseconds timeout);
   size_t PendingMeasurements() const;
   bool HasFailed() const;
@@ -34,7 +35,6 @@ class MeasureClient {
   void RunSubscription();
   void RunMeasurements();
   void RunMovement();
-  void ReportPosition(double x, double y);
   bool WaitBeforeRetry(std::chrono::milliseconds delay);
   void Fail(const std::string& message);
 

@@ -437,11 +437,71 @@ TEST_CASE("reliable commands are retried until applied and stale acknowledgments
   context.TryCancel();
   reader->Finish();
   grpc::ClientContext unsupported_context;
-  info.set_protocol_version(2);
+  info.set_protocol_version(3);
   auto unsupported = stub->Subscribe(&unsupported_context, info);
   CHECK_FALSE(unsupported->Read(&command));
   CHECK(unsupported->Finish().error_code() ==
         grpc::StatusCode::FAILED_PRECONDITION);
+  server->Shutdown();
+}
+
+TEST_CASE("movement protocol persists valid positions and destinations") {
+  TemporaryDatabase database;
+  auto service = std::make_unique<MeasureServiceImpl>(10, database.path);
+  int port = 0;
+  auto server = StartServer(*service, &port);
+  REQUIRE(server != nullptr);
+  auto stub = measure::Measure::NewStub(TestChannel(port, false));
+  grpc::ClientContext subscription_context;
+  measure::ClientInfo info;
+  info.set_client_id("sensor-1");
+  info.set_protocol_version(2);
+  auto reader = stub->Subscribe(&subscription_context, info);
+  measure::Command command;
+  REQUIRE(reader->Read(&command));
+  CHECK(command.protocol_version() == 2);
+  CHECK_FALSE(command.has_destination());
+
+  measure::PositionReport position;
+  position.set_client_id("sensor-1");
+  position.set_x(12.5);
+  position.set_y(75.25);
+  position.set_timestamp_unix_ms(123456);
+  measure::PositionReceipt receipt;
+  grpc::ClientContext position_context;
+  REQUIRE(stub->ReportPosition(&position_context, position, &receipt).ok());
+  position.set_x(101);
+  grpc::ClientContext invalid_position_context;
+  CHECK(stub->ReportPosition(&invalid_position_context, position, &receipt)
+            .error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+
+  service->SetDestination("sensor-1", 40, 50, 1.5);
+  REQUIRE(reader->Read(&command));
+  CHECK(command.protocol_version() == 2);
+  CHECK(command.has_destination());
+  CHECK(command.destination_x() == 40);
+  CHECK(command.destination_y() == 50);
+  CHECK(command.movement_speed() == 1.5);
+  subscription_context.TryCancel();
+  reader->Finish();
+  server->Shutdown();
+  server.reset();
+  service.reset();
+
+  service = std::make_unique<MeasureServiceImpl>(10, database.path);
+  const auto positions = service->GetLatestPositionsSnapshot();
+  REQUIRE(positions.size() == 1);
+  CHECK(positions.front().x == 12.5);
+  CHECK(positions.front().y == 75.25);
+  server = StartServer(*service, &port, port);
+  stub = measure::Measure::NewStub(TestChannel(port, false));
+  grpc::ClientContext restored_context;
+  auto restored = stub->Subscribe(&restored_context, info);
+  REQUIRE(restored->Read(&command));
+  CHECK(command.has_destination());
+  CHECK(command.destination_x() == 40);
+  restored_context.TryCancel();
+  restored->Finish();
   server->Shutdown();
 }
 

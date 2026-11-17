@@ -96,6 +96,41 @@ bool MeasureClient::RecordMeasurement(int value) {
   return true;
 }
 
+bool MeasureClient::ReportPosition(double x, double y) {
+  if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 100 || y < 0 ||
+      y > 100) {
+    std::cerr << "Position must contain finite coordinates from 0 to 100."
+              << std::endl;
+    return false;
+  }
+  measure::PositionReport position;
+  position.set_client_id(client_id_);
+  position.set_x(x);
+  position.set_y(y);
+  position.set_timestamp_unix_ms(CurrentTimeMillis());
+  measure::PositionReceipt receipt;
+  grpc::ClientContext context;
+  context.set_deadline(std::chrono::system_clock::now() +
+                       std::chrono::seconds(2));
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (stopping_ || failed_) return false;
+    position_context_ = &context;
+  }
+  const auto status = stub_->ReportPosition(&context, position, &receipt);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    position_context_ = nullptr;
+    if (stopping_ || failed_) return false;
+  }
+  if (!status.ok()) {
+    std::cerr << "Position report failed: " << status.error_message()
+              << std::endl;
+    return false;
+  }
+  return true;
+}
+
 bool MeasureClient::WaitForMeasurements(std::chrono::milliseconds timeout) {
   std::unique_lock<std::mutex> lock(mu_);
   cv_.wait_for(lock, timeout, [this] {
@@ -295,40 +330,13 @@ void MeasureClient::RunMovement() {
         next_report = now + std::chrono::seconds(1);
       }
     }
-    if (report) ReportPosition(report_x, report_y);
-  }
-}
-
-void MeasureClient::ReportPosition(double x, double y) {
-  measure::PositionReport report;
-  report.set_client_id(client_id_);
-  report.set_x(x);
-  report.set_y(y);
-  report.set_timestamp_unix_ms(CurrentTimeMillis());
-  measure::PositionReceipt receipt;
-  grpc::ClientContext context;
-  context.set_deadline(std::chrono::system_clock::now() +
-                       std::chrono::seconds(2));
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (stopping_ || failed_) return;
-    position_context_ = &context;
-  }
-  const auto status = stub_->ReportPosition(&context, report, &receipt);
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    position_context_ = nullptr;
-    if (stopping_ || failed_) return;
-  }
-  if (!status.ok()) {
-    std::cerr << "Position report failed: " << status.error_message()
-              << std::endl;
-    std::lock_guard<std::mutex> lock(mu_);
-    if (!stopping_ && !failed_) {
-      position_report_pending_ = true;
-      position_retry_at_ = std::chrono::steady_clock::now() +
-                           std::chrono::seconds(1);
-      cv_.notify_all();
+    if (report && !ReportPosition(report_x, report_y)) {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (!stopping_ && !failed_) {
+        position_report_pending_ = true;
+        position_retry_at_ = std::chrono::steady_clock::now() +
+                             std::chrono::seconds(1);
+      }
     }
   }
 }
