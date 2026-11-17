@@ -292,13 +292,7 @@ void MeasureClient::RunMovement() {
     bool report = false;
     {
       std::unique_lock<std::mutex> lock(mu_);
-      cv_.wait_for(lock, std::chrono::milliseconds(100),
-                   [this] {
-                     return stopping_ || failed_ ||
-                            (position_report_pending_ &&
-                             std::chrono::steady_clock::now() >=
-                                 position_retry_at_);
-                   });
+      cv_.wait_for(lock, std::chrono::milliseconds(100));
       if (stopping_ || failed_) return;
 
       const auto now = std::chrono::steady_clock::now();
