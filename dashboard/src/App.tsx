@@ -55,7 +55,7 @@ type Layout = {
 }
 
 const initialLayout: Layout = {
-  left: ['configuration', 'threshold', 'calibration', 'devices'],
+  left: ['configuration', 'threshold', 'calibration', 'destination', 'devices'],
   right: ['chart', 'history'],
 }
 
@@ -376,7 +376,7 @@ function App() {
         return (
           <Panel key={id} id={id} title="Fleet Devices" {...dragProps}>
             <div className="table-scroll">
-              <table><thead><tr><th>Device</th><th>Status</th><th>Command</th><th>Latest reading</th><th>Last seen</th></tr></thead>
+              <table><thead><tr><th>Device</th><th>Status</th><th>Command</th><th>Position</th><th>Destination</th><th>Latest reading</th><th>Last seen</th></tr></thead>
                 <tbody>{data.devices.map(device => (
                   <tr key={device.client_id}>
                     <td>{device.client_id}</td>
@@ -386,12 +386,38 @@ function App() {
                         : device.desired_revision === device.acknowledged_revision ? 'Applied'
                           : device.connected ? 'Awaiting acknowledgment' : 'Pending reconnect'}
                     </td>
+                    <td>{device.position_x === null ? '—' : `${device.position_x}, ${device.position_y}`}</td>
+                    <td>{device.has_destination ? `${device.destination_x}, ${device.destination_y} @ ${device.movement_speed}` : 'Stopped'}</td>
                     <td>{device.latest_point ?? '—'}</td><td>{timeLabel(device.timestamp_unix_ms)}</td>
                   </tr>
                 ))}</tbody>
               </table>
               {!data.devices.length && <div className="empty">No devices have connected or submitted measurements yet.</div>}
             </div>
+          </Panel>
+        )
+      case 'destination':
+        return (
+          <Panel key={id} id={id} title="Destination" {...dragProps}>
+            <form className="panel-form" onSubmit={event => {
+              event.preventDefault()
+              void submit('/api/destination', {
+                client_id: target,
+                destination_x: destinationX,
+                destination_y: destinationY,
+                speed,
+              })
+            }}>
+              <label>Target device<select required value={target} onChange={event => setTarget(event.target.value)}>
+                <option value="" disabled>Select a device</option>
+                {data.devices.map(device =>
+                  <option key={device.client_id} value={device.client_id}>{device.client_id}</option>)}
+              </select></label>
+              <label>X<input type="number" min="0" max="100" step="any" required value={destinationX} onChange={event => setDestinationX(event.target.value)} /></label>
+              <label>Y<input type="number" min="0" max="100" step="any" required value={destinationY} onChange={event => setDestinationY(event.target.value)} /></label>
+              <label>Speed<input type="number" min="0.000001" step="any" required value={speed} onChange={event => setSpeed(event.target.value)} /></label>
+              <button className="secondary" type="submit">Set destination</button>
+            </form>
           </Panel>
         )
       case 'chart':
