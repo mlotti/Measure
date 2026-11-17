@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -92,6 +93,31 @@ bool MeasureClient::RecordMeasurement(int value) {
   return true;
 }
 
+bool MeasureClient::ReportPosition(double x, double y) {
+  if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 100 || y < 0 ||
+      y > 100) {
+    std::cerr << "Position must contain finite coordinates from 0 to 100."
+              << std::endl;
+    return false;
+  }
+  measure::PositionReport position;
+  position.set_client_id(client_id_);
+  position.set_x(x);
+  position.set_y(y);
+  position.set_timestamp_unix_ms(CurrentTimeMillis());
+  measure::PositionReceipt receipt;
+  grpc::ClientContext context;
+  context.set_deadline(std::chrono::system_clock::now() +
+                       std::chrono::seconds(2));
+  const auto status = stub_->ReportPosition(&context, position, &receipt);
+  if (!status.ok()) {
+    std::cerr << "Position report failed: " << status.error_message()
+              << std::endl;
+    return false;
+  }
+  return true;
+}
+
 bool MeasureClient::WaitForMeasurements(std::chrono::milliseconds timeout) {
   std::unique_lock<std::mutex> lock(mu_);
   cv_.wait_for(lock, timeout, [this] {
@@ -143,17 +169,26 @@ void MeasureClient::RunSubscription() {
     }
     measure::ClientInfo info;
     info.set_client_id(client_id_);
-    info.set_protocol_version(1);
+    info.set_protocol_version(2);
     auto reader = stub_->Subscribe(&context, info);
     measure::Command command;
     while (reader->Read(&command)) {
       const bool calibration = command.mode() == measure::CALIBRATION;
-      if (command.protocol_version() != 1 || command.revision() <= 0 ||
+      const bool moving = command.has_destination();
+      if (command.protocol_version() != 2 || command.revision() <= 0 ||
           (command.mode() != measure::NORMAL && !calibration) ||
           command.threshold() < 0 || command.threshold() > 100000 ||
           command.normal_threshold() < 0 || command.normal_threshold() > 100000 ||
           (calibration ? command.expires_unix_ms() <= 0
-                       : command.expires_unix_ms() != 0)) {
+                       : command.expires_unix_ms() != 0) ||
+          (moving && (!std::isfinite(command.destination_x()) ||
+                      !std::isfinite(command.destination_y()) ||
+                      command.destination_x() < 0 ||
+                      command.destination_x() > 100 ||
+                      command.destination_y() < 0 ||
+                      command.destination_y() > 100 ||
+                      !std::isfinite(command.movement_speed()) ||
+                      command.movement_speed() <= 0))) {
         Fail("Unsupported or invalid command protocol; stopping client.");
         break;
       }
